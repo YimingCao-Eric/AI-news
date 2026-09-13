@@ -1,0 +1,44 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# --- Virtualenv / uv ---
+.venv/
+venv/
+
+# --- Tooling caches ---
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- Secrets ---
+.env
+.env.local
+!.env.example
+
+# --- Local state ---
+# The SQLite store. Phase 5 revisits this: the GitHub Action delivery option in
+# PLAN.md section 7 commits the database back to the repo so dedupe history survives
+# between runs, at which point this line has to come out.
+*.db
+*.db-journal
+*.sqlite3
+
+# NOT ignored: digests/
+# The dated Markdown files are the product, and ~5KB/day of history is worth keeping in
+# git whichever way scheduling lands.
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

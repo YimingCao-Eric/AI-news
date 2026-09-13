@@ -1,0 +1,79 @@
+# Tier 1 sources -- endpoints from docs/PLAN.md section 2.
+#
+# `weight`      scales the rule score of every item from this source (rank.py, phase 3).
+# `fetch_limit` caps how many items we PULL and STORE per run. Not to be confused with the
+#               per-topic `quota` in interests.yaml, which caps how many items REACH the
+#               digest. Fetch generously: raw payloads are kept so the ranker can be
+#               re-run over history offline (PLAN.md section 4). `null` means unlimited.
+# `enabled`     config intent. Distinct from the runtime health record in the `sources`
+#               table, which tracks consecutive_failures.
+
+sources:
+  - name: hn
+    kind: json_api
+    # search_by_date, not tags=front_page: this job runs once a day at 07:00, and a
+    # front-page snapshot misses anything that peaked at 03:00 and rolled off. The points
+    # floor matches interests.yaml hard_rules.min_hn_points.
+    # {since_ts} is a unix timestamp filled in by the adapter at fetch time (now - 24h).
+    # Fallback if the date search ever disappoints:
+    #   https://hn.algolia.com/api/v1/search?tags=front_page
+    url: "https://hn.algolia.com/api/v1/search_by_date?tags=story&numericFilters=points>100,created_at_i>{since_ts}"
+    weight: 1.0
+    fetch_limit: 30
+    enabled: true
+
+  - name: gh_trending
+    kind: html
+    # No official API and never has been; the HTML is stable. Mirror feeds exist
+    # (mshibanami/GitHubTrendingRSS) if the scrape turns out to be a maintenance burden.
+    url: "https://github.com/trending?since=daily&spoken_language_code=en"
+    weight: 1.0
+    fetch_limit: 25
+    enabled: false
+
+  - name: hf_papers
+    kind: json_api
+    # The curated daily-papers feed -- far better signal than raw new-model listings.
+    url: "https://huggingface.co/api/daily_papers"
+    weight: 1.1
+    fetch_limit: 20
+    enabled: false
+
+  - name: ai_blogs
+    kind: rss
+    # A bundle: six endpoints sharing one weight, one fetch budget and one health record.
+    # Rule is official feed first, community mirror only where no official feed exists.
+    #
+    # Deliberately not subscribed: anthropic_red (frontier safety research -- real work,
+    # but matches no topic in interests.yaml), cohere (enterprise sales posts), xai
+    # (announcement volume, artifact-light), google_ai (overlaps DeepMind).
+    #
+    # ⚠️ PHASE 3A, BEFORE WRITING THE ADAPTER: check the newest pubDate in all six. The
+    # Anthropic mirrors were last seen topping out at 2026-07-14, which may have been a
+    # stale cache but is unconfirmed. If they really are months behind, switch to
+    # taobojlen/anthropic-rss-feed or an RSSHub route -- do not ship a feed that quietly
+    # delivers nothing.
+    feeds:
+      - name: openai_news
+        url: "https://openai.com/news/rss.xml"          # official
+      - name: deepmind
+        url: "https://deepmind.google/blog/rss.xml"     # official
+      - name: anthropic_news
+        url: "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_anthropic_news.xml"
+      - name: anthropic_engineering
+        url: "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_anthropic_engineering.xml"
+      - name: meta_ai
+        url: "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_meta_ai.xml"
+      - name: mistral
+        url: "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_mistral.xml"
+    weight: 1.2
+    fetch_limit: null
+    enabled: false
+
+  - name: arxiv_cs_ai
+    kind: rss
+    # High volume (~50/day). Fetched in full and quota'd at selection time, not at ingest.
+    url: "https://rss.arxiv.org/rss/cs.AI"
+    weight: 0.7
+    fetch_limit: 50
+    enabled: false

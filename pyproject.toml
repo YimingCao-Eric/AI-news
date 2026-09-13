@@ -1,0 +1,60 @@
+[project]
+name = "digest"
+version = "0.1.0"
+description = "Personal daily AI/tech news digest: fetch, dedupe, rank, summarise, render one Markdown page."
+readme = "README.md"
+authors = [
+    { name = "YimingCao-Eric", email = "31464099+YimingCao-Eric@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "feedparser>=6.0.14",
+    "httpx>=0.28.1",
+    "jinja2>=3.1.6",
+    "pydantic>=2",
+    "pyyaml>=6.0.3",
+    "selectolax>=0.4.11",
+]
+
+[project.scripts]
+digest = "digest.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.11,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.7",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "ANN",  # flake8-annotations -- CLAUDE.md: type hints everywhere
+    "RUF",
+]
+# No ANN401 ignore on purpose. It was expected to flag `Item.raw: dict[str, Any]`; it does
+# not -- ANN401 only fires on a *bare* `Any` in a parameter or return annotation, which
+# `dict[str, Any]` on a model attribute is not. Leaving the rule live means it still catches
+# a genuinely lazy `def f(x: Any)`. The decision that `Item.raw` stays untyped is recorded
+# on the field itself in models.py, which is where someone tempted to narrow it will look.
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
