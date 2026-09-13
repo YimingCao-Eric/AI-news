@@ -14,7 +14,12 @@ sources:
     # search_by_date, not tags=front_page: this job runs once a day at 07:00, and a
     # front-page snapshot misses anything that peaked at 03:00 and rolled off. The points
     # floor matches interests.yaml hard_rules.min_hn_points.
-    # {since_ts} is a unix timestamp filled in by the adapter at fetch time (now - 24h).
+    # {since_ts} is a unix timestamp the adapter computes at fetch time: now - 48h
+    # (adapters/hn.py LOOKBACK_HOURS). Not 24h -- a story posted 30h ago that only crosses
+    # 100 points this morning was never inside a 24h window on either run, so slow burners
+    # would be missed permanently. Re-seeing yesterday's items is free once phase 2 dedupes
+    # on url hash. The adapter finds this placeholder in the parsed query params, so moving
+    # the window to a different param here needs no code change.
     # Fallback if the date search ever disappoints:
     #   https://hn.algolia.com/api/v1/search?tags=front_page
     url: "https://hn.algolia.com/api/v1/search_by_date?tags=story&numericFilters=points>100,created_at_i>{since_ts}"
