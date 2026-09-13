@@ -17,7 +17,9 @@ making design decisions; do not re-derive the architecture.
 - No web framework, no server, no Docker, no task queue, no Celery.
 - No new third-party dependency without asking the user first.
 - No network access in tests. Every adapter test runs against a recorded fixture in
-  `tests/fixtures/`.
+  `tests/fixtures/`. This is *enforced*, not trusted: `tests/conftest.py` has an autouse
+  session fixture that makes any non-loopback connection raise. Don't weaken it — a phase 0
+  test went silently online the moment `digest fetch` grew a real implementation under it.
 - Never let one failing source abort a run. Catch per-source, record the failure, continue.
 - Never sort the Hugging Face models API by `createdAt` (thousands of junk uploads daily) —
   use `trendingScore`.
@@ -34,6 +36,13 @@ fetch → normalise → store → rank → summarise → render → deliver
 - `render.py` only turns selected items into text via a jinja2 template.
 
 ## Conventions
+- **Every file read and write passes `encoding="utf-8"` explicitly.** Never a bare
+  `open(path, "w")`, `read_text()` or `write_text()`. Windows defaults to the locale
+  codepage (cp1252 here), so the first CJK or emoji headline crashes the step with
+  `UnicodeEncodeError` — this already nearly shipped in the fetch printer and would hit
+  `render` next. CI on Linux defaults to UTF-8 and will never reproduce it, so the tests
+  are the only thing standing between this and a 07:00 failure on the laptop.
+- Console output goes through `cli._force_utf8_output()` for the same reason.
 - All timestamps stored as ISO8601 UTC strings.
 - Every module gets a `--dry-run`-able CLI path where it makes sense.
 - Log one line per source per run: name, items fetched, new items, duration, ok/failed.

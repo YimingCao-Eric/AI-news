@@ -141,8 +141,18 @@ def test_unknown_key_fails_loudly(tmp_path):
 
 
 @pytest.mark.parametrize("command", ["fetch", "rank", "render", "run"])
-def test_every_subcommand_parses_and_runs(command, capsys):
+def test_every_subcommand_parses(command):
     assert build_parser().parse_args([command]).command == command
+
+
+@pytest.mark.parametrize("command", ["rank", "render", "run"])
+def test_stub_subcommands_still_print_the_config(command, capsys):
+    """`fetch` is excluded deliberately: it is live as of phase 1 and would hit the network.
+
+    Its CLI path is covered in test_hn.py with the transport mocked. This test used to
+    include it and silently started making real HTTP calls the moment fetch was wired up --
+    which is how a suite that claims to be offline stops being one.
+    """
     assert main([command, "--config-dir", str(REPO_ROOT)]) == 0
     assert "not implemented" in capsys.readouterr().out
 
