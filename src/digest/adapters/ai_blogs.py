@@ -32,24 +32,11 @@ from digest.models import Item
 #: comfortably inside 20s even in the worst case.
 FEED_TIMEOUT_SECONDS = 8.0
 
-#: How many days without a new entry before a feed is reported STALE.
+#: Fallback when a feed does not set `stale_after_days` in sources.yaml.
 #:
-#: Per feed, not global, and derived from cadence measured 2026-09-14. A global threshold
-#: either cries wolf on the slow feeds or sleeps through the fast ones, and a warning that
-#: cries wolf gets ignored -- which costs the entire mechanism. Tune a number here when a
-#: feed's real cadence turns out to differ; that is a one-line change by design.
-#:
-#: (Ideally these live in sources.yaml next to the feed. They are here because phase 3a was
-#: scoped not to touch config.py, and `Feed` forbids extra keys. Moving them is a small
-#: config change whenever that is allowed.)
-STALENESS_THRESHOLD_DAYS: dict[str, int] = {
-    "openai_news": 7,  # measured 0d old, 1193 entries -- posts constantly
-    "deepmind": 21,  # measured 6d old, official feed
-    "anthropic_news": 30,  # measured 13d old
-    "claude": 14,  # measured 0d old, changelog-like cadence
-    "anthropic_research": 60,  # measured 4d old but only 15 entries total -- low volume
-    "cursor": 45,  # measured 4d old, 22 entries -- changelog cadence
-}
+#: The per-feed values live in config, beside the URL they describe -- cadence is a
+#: property of the feed, not of this module, and a threshold buried in adapter code is one
+#: nobody edits when a feed's rhythm changes.
 DEFAULT_STALENESS_THRESHOLD_DAYS = 30
 
 #: Ingest cutoff. Entries older than this are not stored.
@@ -192,15 +179,16 @@ def conditional_headers(
     return headers
 
 
-def staleness_threshold(feed_name: str) -> int:
-    return STALENESS_THRESHOLD_DAYS.get(feed_name, DEFAULT_STALENESS_THRESHOLD_DAYS)
+def staleness_threshold(feed: Feed) -> int:
+    """This feed's configured threshold, or the default."""
+    return feed.stale_after_days or DEFAULT_STALENESS_THRESHOLD_DAYS
 
 
-def is_stale(feed_name: str, newest: datetime | None, now: datetime) -> bool:
+def is_stale(feed: Feed, newest: datetime | None, now: datetime) -> bool:
     """A feed whose newest entry predates its threshold. 200 OK, well-formed, and dead."""
     if newest is None:
         return True
-    return now - newest > timedelta(days=staleness_threshold(feed_name))
+    return now - newest > timedelta(days=staleness_threshold(feed))
 
 
 def _describe(outcome: FeedOutcome, now: datetime) -> str:
@@ -215,7 +203,9 @@ def _describe(outcome: FeedOutcome, now: datetime) -> str:
 
     age_days = (now - outcome.newest).days
     marker = (
-        f" STALE (>{staleness_threshold(name)}d)" if is_stale(name, outcome.newest, now) else ""
+        f" STALE (>{staleness_threshold(outcome.feed)}d)"
+        if is_stale(outcome.feed, outcome.newest, now)
+        else ""
     )
     return (
         f"{name}: {len(outcome.items)} recent of {outcome.total_entries}, "

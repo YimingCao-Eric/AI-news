@@ -53,9 +53,10 @@ sources:
     # The finding that matters: the Olshansk mirror is not uniformly unreliable, it is
     # unreliable PER FEED -- both official feeds were fresh, and three of four mirror feeds
     # were months stale while returning HTTP 200 with well-formed XML. One healthy feed from
-    # that mirror tells you nothing about the others, which is why adapters/ai_blogs.py
-    # carries a per-feed staleness threshold and reports STALE in the run summary. Without
-    # it these simply go quiet and nothing says so.
+    # that mirror tells you nothing about the others, which is why each feed below carries
+    # its own `stale_after_days` and the run summary reports STALE. Without it these simply
+    # go quiet and nothing says so. Thresholds are cadence-derived: one global number would
+    # either cry wolf on the slow feeds or sleep through the fast ones.
     #
     # DROPPED 2026-09-14, all three months stale, all replaced below. Every alternative
     # checked returned 404 (taobojlen/anthropic-rss-feed, official Anthropic/Meta/Mistral
@@ -71,18 +72,24 @@ sources:
     feeds:
       - name: openai_news
         url: "https://openai.com/news/rss.xml"          # official
+        stale_after_days: 7      # measured 0d old, 1193 entries -- posts constantly
       - name: deepmind
         url: "https://deepmind.google/blog/rss.xml"     # official
+        stale_after_days: 21     # measured 6d old
       - name: anthropic_news
         url: "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_anthropic_news.xml"
+        stale_after_days: 30     # measured 13d old
       # Replacements for the three dropped feeds. Chosen to weight toward ai-coding-agents,
       # the highest-weighted topic in interests.yaml (1.2).
       - name: claude
         url: "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_claude.xml"
+        stale_after_days: 14     # measured 0d old, changelog-like cadence
       - name: anthropic_research
         url: "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_anthropic_research.xml"
+        stale_after_days: 60     # measured 4d old but only 15 entries total -- low volume
       - name: cursor
         url: "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_cursor.xml"
+        stale_after_days: 45     # measured 4d old, 22 entries -- changelog cadence
     weight: 1.2
     fetch_limit: null
     enabled: true

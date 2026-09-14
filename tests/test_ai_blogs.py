@@ -147,20 +147,42 @@ def test_an_entry_with_no_date_is_kept(source):
 # ---------------------------------------------------------------------------- staleness
 
 
-def test_staleness_thresholds_are_per_feed():
+def test_staleness_thresholds_come_from_config(source):
+    """Cadence is a property of the feed, so the number lives beside its URL."""
+    by_name = {feed.name: feed for feed in source.feeds}
+    assert staleness_threshold(by_name["openai_news"]) == 7
+    assert staleness_threshold(by_name["anthropic_research"]) == 60
+    assert by_name["openai_news"].stale_after_days == 7
+
+
+def test_a_feed_without_a_threshold_uses_the_default():
+    assert staleness_threshold(Feed(name="x", url="https://e.example/f.xml")) == 30
+
+
+def test_is_stale_uses_the_feeds_own_threshold(source):
     """A global N either cries wolf on slow feeds or sleeps through fast ones."""
-    assert staleness_threshold("openai_news") == 7
-    assert staleness_threshold("anthropic_research") == 60
-    assert staleness_threshold("something_unconfigured") == 30
-
-
-def test_is_stale_uses_the_feeds_own_threshold():
     now = datetime(2026, 9, 14, tzinfo=UTC)
     forty_days_ago = now - timedelta(days=40)
+    by_name = {feed.name: feed for feed in source.feeds}
 
-    assert is_stale("openai_news", forty_days_ago, now)  # threshold 7
-    assert not is_stale("anthropic_research", forty_days_ago, now)  # threshold 60
-    assert is_stale("anything", None, now)
+    assert is_stale(by_name["openai_news"], forty_days_ago, now)  # threshold 7
+    assert not is_stale(by_name["anthropic_research"], forty_days_ago, now)  # threshold 60
+    assert is_stale(by_name["cursor"], None, now)
+
+
+def test_changing_a_threshold_is_a_one_line_config_edit(source):
+    """Load-bearing: the whole point of per-feed thresholds is that they are tunable.
+
+    A feed whose cadence turns out to be monthly should stop warning by editing
+    sources.yaml, not by editing adapter code.
+    """
+    feed = source.feeds[0]
+    forty_days_ago = datetime(2026, 9, 14, tzinfo=UTC) - timedelta(days=40)
+    now = datetime(2026, 9, 14, tzinfo=UTC)
+
+    assert is_stale(feed, forty_days_ago, now)
+    relaxed = feed.model_copy(update={"stale_after_days": 90})
+    assert not is_stale(relaxed, forty_days_ago, now)
 
 
 def test_a_stale_feed_is_reported_not_silently_empty(source):

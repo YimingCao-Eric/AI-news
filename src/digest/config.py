@@ -33,6 +33,18 @@ class Feed(BaseModel):
 
     name: str
     url: str
+    stale_after_days: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Days without a new entry before this feed is reported STALE in the run "
+            "summary. Per feed rather than global: a feed that posts monthly is not stale "
+            "at 40 days, and one threshold for all of them either cries wolf on the slow "
+            "feeds or sleeps through the fast ones -- and a warning that cries wolf gets "
+            "ignored, which costs the whole mechanism. None uses "
+            "adapters.ai_blogs.DEFAULT_STALENESS_THRESHOLD_DAYS."
+        ),
+    )
 
 
 class Source(BaseModel):
