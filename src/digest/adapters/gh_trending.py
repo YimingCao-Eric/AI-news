@@ -12,7 +12,6 @@ the rot the health footer cannot catch. See CLAUDE.md, the zero-items rule.
 """
 
 import re
-from datetime import UTC, datetime
 
 import httpx
 from selectolax.parser import HTMLParser, Node
@@ -112,12 +111,16 @@ def _item_from_row(row: Node, source_name: str) -> Item | None:
         # The trending page carries no date. Nullable by design rather than faked with
         # "now", which would make every repo look freshly published to the recency bonus.
         published_at=None,
+        # Synthesised rather than a source payload -- there is no JSON here to keep verbatim,
+        # so this is the closest thing to one. It carries only what the page said.
+        # Deliberately NOT a `scraped_at` timestamp: `first_seen_at` is the column that owns
+        # "when we saw this" (PLAN.md section 4), and putting our own clock inside `raw` both
+        # duplicated it and made the row non-reproducible from a fixed fixture.
         raw={
             "full_name": full_name,
             "description": description,
             "language": _text(row.css_first(SELECTOR_LANGUAGE)) or None,
             "stars_today": _stars_today(row),
-            "scraped_at": datetime.now(tz=UTC).isoformat(),
         },
     )
 

@@ -149,3 +149,27 @@ def test_every_selector_is_a_module_constant():
     )
     assert "Box-row" not in body
     assert "itemprop" not in body
+
+
+def test_raw_contains_no_clock():
+    """Our own timestamp must not live inside `raw`.
+
+    `raw` briefly carried a `scraped_at` set from `datetime.now()`. That duplicated
+    `first_seen_at` -- the column that owns "when we saw this" -- and made the row
+    irreproducible from a fixed fixture: two runs a second apart over the same HTML produced
+    different raw hashes. Found by the R0 snapshot work, fixed rather than excluded from the
+    dump, because an exclusion would have made the snapshot tolerant of exactly the defect
+    class it exists to catch.
+    """
+    import json
+    from pathlib import Path
+
+    from digest.config import load_config
+
+    source = load_config(Path(__file__).resolve().parents[1]).sources.by_name("gh_trending")
+    items = run_adapter(GhTrendingAdapter(), source, serve(PAGE, 200, "text/html"))
+
+    assert set(items[0].raw) == {"full_name", "description", "language", "stars_today"}
+    first = json.dumps(items[0].raw, sort_keys=True)
+    again = run_adapter(GhTrendingAdapter(), source, serve(PAGE, 200, "text/html"))
+    assert json.dumps(again[0].raw, sort_keys=True) == first
