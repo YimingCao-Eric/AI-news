@@ -1,8 +1,8 @@
 """Run the enabled adapters concurrently and collect their items.
 
 This module owns the guarantee that CLAUDE.md makes twice: **one failing source must never
-abort a run**. Every adapter call is wrapped, every exception becomes a `SourceHealth`
-record, and the run continues. It also owns the one-line-per-source run log, so adapters
+abort a run**. Every adapter call is wrapped, every exception becomes a failed
+`SourceOutcome`, and the run continues. It also owns the one-line-per-source run log, so adapters
 stay silent.
 """
 
@@ -22,7 +22,7 @@ from digest.adapters.gh_trending import GhTrendingAdapter
 from digest.adapters.hf_papers import HFPapersAdapter
 from digest.adapters.hn import HNAdapter
 from digest.config import Config, Source
-from digest.models import Item, SourceHealth
+from digest.models import Item, SourceOutcome
 
 log = logging.getLogger(__name__)
 
@@ -38,12 +38,14 @@ class FetchResult:
     """
 
     items: list[Item] = field(default_factory=list)
-    health: list[SourceHealth] = field(default_factory=list)
+    #: One per enabled source: what this run did to it. An event, not accumulated state --
+    #: `store.get_source_health` owns the latter and is the only thing that can count.
+    outcomes: list[SourceOutcome] = field(default_factory=list)
     #: Wall-clock seconds per source name. Measured here because only the fetch loop sees it.
     durations: dict[str, float] = field(default_factory=dict)
     #: Per-source diagnostics from `Adapter.drain_notes` -- per-feed counts, failures and
     #: staleness for bundle sources. The state between "worked" and "failed", which
-    #: neither Item nor SourceHealth can express.
+    #: neither Item nor SourceOutcome can express.
     notes: dict[str, list[str]] = field(default_factory=dict)
 
 
@@ -78,7 +80,7 @@ def user_agent() -> str:
 
 async def _fetch_one(
     client: httpx.AsyncClient, source: Source
-) -> tuple[list[Item], SourceHealth, float, list[str]]:
+) -> tuple[list[Item], SourceOutcome, float, list[str]]:
     """Fetch one source. Never raises: every failure becomes a health record."""
     started = time.monotonic()
     items: list[Item] = []
@@ -109,26 +111,28 @@ async def _fetch_one(
             notes = reporting_adapter.drain_notes()
 
     duration = time.monotonic() - started
-    if error is None:
-        health = SourceHealth(name=source.name, last_success_at=datetime.now(tz=UTC))
-    else:
-        # A flag, not a count. `store.record_source_health` owns the real consecutive-failure
-        # counter, because only it can see the previous value.
-        health = SourceHealth(name=source.name, consecutive_failures=1)
+    finished_at = datetime.now(tz=UTC)
+    # Exactly one instant, and no counts: `SourceOutcome` cannot express "failed, but here is
+    # when it last worked", and the store computes every counter from the row it already has.
+    outcome = (
+        SourceOutcome(name=source.name, succeeded_at=finished_at)
+        if error is None
+        else SourceOutcome(name=source.name, failed_at=finished_at)
+    )
 
     # CLAUDE.md's one-line-per-source run log is emitted by the caller, not here: the "new
     # items" column only exists after the store has written, and fetch.py is not allowed to
     # touch the store. `durations` on FetchResult is how the timing reaches it.
-    return items, health, duration, notes
+    return items, outcome, duration, notes
 
 
 async def fetch_all(config: Config) -> FetchResult:
     """Fetch every enabled source concurrently.
 
-    Returns everything that succeeded plus a health record and a duration per source, in
+    Returns everything that succeeded plus an outcome and a duration per source, in
     config order. Sources that are disabled in sources.yaml are not fetched and get no health
-    record -- the config is the single source of truth for whether a source runs, which is
-    why `SourceHealth` has no `enabled` flag of its own.
+    outcome -- the config is the single source of truth for whether a source runs, which is
+    why neither `SourceOutcome` nor `SourceHealth` has an `enabled` flag of its own.
     """
     sources = config.sources.enabled
     if not sources:
@@ -144,7 +148,7 @@ async def fetch_all(config: Config) -> FetchResult:
         )
 
     items: list[Item] = []
-    health: list[SourceHealth] = []
+    outcomes: list[SourceOutcome] = []
     durations: dict[str, float] = {}
     notes: dict[str, list[str]] = {}
     for source, result in zip(sources, results, strict=True):
@@ -158,14 +162,14 @@ async def fetch_all(config: Config) -> FetchResult:
             # Belt and braces: _fetch_one catches every Exception, so reaching here means a
             # bug in the wrapper itself. Still must not abort the run.
             log.error("source %s failed outside the adapter wrapper", source.name, exc_info=result)
-            health.append(SourceHealth(name=source.name, consecutive_failures=1))
+            outcomes.append(SourceOutcome(name=source.name, failed_at=datetime.now(tz=UTC)))
             durations[source.name] = 0.0
             continue
-        source_items, source_health, duration, source_notes = result
+        source_items, outcome, duration, source_notes = result
         items.extend(source_items)
-        health.append(source_health)
+        outcomes.append(outcome)
         durations[source.name] = duration
         if source_notes:
             notes[source.name] = source_notes
 
-    return FetchResult(items=items, health=health, durations=durations, notes=notes)
+    return FetchResult(items=items, outcomes=outcomes, durations=durations, notes=notes)

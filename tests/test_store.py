@@ -6,8 +6,9 @@ from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
-from digest.models import Item, SourceHealth
+from digest.models import Item, SourceOutcome
 from digest.store import (
     SCHEMA_VERSION,
     StoreError,
@@ -27,6 +28,7 @@ from digest.store import (
     upsert_items,
     url_hash,
 )
+from tests.conftest import fixture_text
 
 
 @pytest.fixture
@@ -182,14 +184,19 @@ def test_refuses_a_newer_schema(tmp_path):
         init_db(path)
 
 
-def test_refuses_an_older_schema_rather_than_guessing(tmp_path):
+def test_refuses_a_version_with_no_migration_path(tmp_path):
+    """Older is now upgraded, not refused -- but only along a chain that actually exists.
+
+    A gap must still fail loudly rather than be guessed at: version 0 has no step to 1, so
+    running the v1->v2 step against it would apply the wrong DDL to an unknown shape.
+    """
     path = tmp_path / "old.db"
     init_db(path).close()
     conn = sqlite3.connect(path, isolation_level=None)
     conn.execute("UPDATE schema_version SET version = 0")
     conn.close()
 
-    with pytest.raises(StoreError, match="no migration exists"):
+    with pytest.raises(StoreError, match="no migration to 1 exists"):
         init_db(path)
 
 
@@ -424,38 +431,95 @@ def test_new_items_are_ordered_oldest_first(conn):
 # --------------------------------------------------------------------------- source health
 
 
-def test_consecutive_failures_accumulate_then_reset(conn):
-    """Phase 1 could only ever report 0 or 1; the store owns the real counter."""
-    failure = SourceHealth(name="hn")
-    for expected in (1, 2, 3):
-        record_source_health(conn, failure)
+def test_failures_accumulate_and_only_one_counter_resets_on_recovery(conn):
+    """The sequence this theme owes. Phase 1 could only ever report 0 or 1.
+
+    `consecutive_failures` answers "is it failing right now" and correctly resets.
+    `total_failures` and `last_failure_at` answer "has it been failing" and must not, or a
+    source that fails every other day reads as perfectly healthy every time you look after a
+    success -- the counter cleared and nothing else remembered.
+    """
+    failed_at = [datetime(2026, 9, 12 + day, 14, 0, tzinfo=UTC) for day in range(3)]
+    for expected, when in enumerate(failed_at, start=1):
+        record_source_health(conn, "hn", failed_at=when)
         (record,) = get_source_health(conn)
         assert record.consecutive_failures == expected
+        assert record.total_failures == expected
+        assert record.last_failure_at == when
         assert record.last_success_at is None
 
-    success_at = datetime(2026, 9, 14, 14, 0, tzinfo=UTC)
-    record_source_health(conn, SourceHealth(name="hn", last_success_at=success_at))
+    success_at = datetime(2026, 9, 15, 14, 0, tzinfo=UTC)
+    record_source_health(conn, "hn", succeeded_at=success_at)
 
     (record,) = get_source_health(conn)
-    assert record.consecutive_failures == 0
+    assert record.consecutive_failures == 0, "the right-now counter must reset"
     assert record.last_success_at == success_at
+    assert record.total_failures == 3, "recovery must not erase that it failed three times"
+    assert record.last_failure_at == failed_at[-1], "nor when it last failed"
 
 
-def test_failure_preserves_the_previous_success_timestamp(conn):
-    """A source that died today still knows when it last worked."""
-    success_at = datetime(2026, 9, 14, 14, 0, tzinfo=UTC)
-    record_source_health(conn, SourceHealth(name="hn", last_success_at=success_at))
-    record_source_health(conn, SourceHealth(name="hn"))
+def test_the_counters_are_computed_by_the_store_not_supplied(conn):
+    """C1 from the layering review: the increment stays here because only here can see it.
+
+    `SourceOutcome` carries no counts at all -- there is no field to pass through -- so the
+    caller cannot compute them even by accident. Two failures recorded through the public
+    API must produce 2, not 1 twice.
+    """
+    outcomes = [
+        SourceOutcome(name="hn", failed_at=datetime(2026, 9, 12, 14, 0, tzinfo=UTC)),
+        SourceOutcome(name="hn", failed_at=datetime(2026, 9, 13, 14, 0, tzinfo=UTC)),
+    ]
+    assert not hasattr(outcomes[0], "consecutive_failures")
+    assert not hasattr(outcomes[0], "total_failures")
+
+    for outcome in outcomes:
+        record_source_health(
+            conn, outcome.name, succeeded_at=outcome.succeeded_at, failed_at=outcome.failed_at
+        )
 
     (record,) = get_source_health(conn)
-    assert record.consecutive_failures == 1
-    assert record.last_success_at == success_at
+    assert record.consecutive_failures == 2
+
+
+def test_a_failed_run_cannot_be_recorded_as_a_success(conn):
+    """The named break from the layering review, now unrepresentable.
+
+    A retry wrapper or a future `run` command assembling a *complete* record would carry the
+    previous `last_success_at` forward onto a failed run -- an obviously sensible thing to
+    do, which under the old signature was read as success and reset the failure counter.
+
+    Two things stop it. `SourceOutcome` refuses both timestamps at once, so "failed, but here
+    is when it last worked" cannot be built. And the store preserves `last_success_at` across
+    failures by itself, so there was never anything to carry.
+    """
+    success_at = datetime(2026, 9, 14, 14, 0, tzinfo=UTC)
+    record_source_health(conn, "hn", succeeded_at=success_at)
+
+    with pytest.raises(ValidationError, match="exactly one"):
+        SourceOutcome(
+            name="hn",
+            succeeded_at=success_at,
+            failed_at=datetime(2026, 9, 15, 14, 0, tzinfo=UTC),
+        )
+    with pytest.raises(StoreError, match="exactly one"):
+        record_source_health(
+            conn, "hn", succeeded_at=success_at, failed_at=datetime(2026, 9, 15, tzinfo=UTC)
+        )
+    with pytest.raises(StoreError, match="exactly one"):
+        record_source_health(conn, "hn")
+
+    record_source_health(conn, "hn", failed_at=datetime(2026, 9, 15, 14, 0, tzinfo=UTC))
+
+    (record,) = get_source_health(conn)
+    assert record.consecutive_failures == 1, "the failed run was recorded as a failure"
+    assert record.last_success_at == success_at, "and the store kept when it last worked"
 
 
 def test_health_records_are_per_source(conn):
-    record_source_health(conn, SourceHealth(name="hn"))
-    record_source_health(conn, SourceHealth(name="arxiv_cs_ai"))
-    record_source_health(conn, SourceHealth(name="hn"))
+    failed_at = datetime(2026, 9, 14, 14, 0, tzinfo=UTC)
+    record_source_health(conn, "hn", failed_at=failed_at)
+    record_source_health(conn, "arxiv_cs_ai", failed_at=failed_at)
+    record_source_health(conn, "hn", failed_at=failed_at)
 
     by_name = {record.name: record for record in get_source_health(conn)}
     assert by_name["hn"].consecutive_failures == 2
@@ -463,9 +527,91 @@ def test_health_records_are_per_source(conn):
 
 
 def test_health_timestamps_come_back_aware(conn):
-    record_source_health(
-        conn, SourceHealth(name="hn", last_success_at=datetime(2026, 9, 14, 14, 0, tzinfo=UTC))
-    )
+    record_source_health(conn, "hn", succeeded_at=datetime(2026, 9, 14, 14, 0, tzinfo=UTC))
+    record_source_health(conn, "hn", failed_at=datetime(2026, 9, 15, 14, 0, tzinfo=UTC))
+
     (record,) = get_source_health(conn)
-    assert record.last_success_at is not None
-    assert record.last_success_at.tzinfo is not None
+    for stamp in (record.last_success_at, record.last_failure_at):
+        assert stamp is not None
+        assert stamp.tzinfo is not None
+
+
+# ----------------------------------------------------------------------------- migration
+
+
+def test_a_v1_database_upgrades_in_place(tmp_path):
+    """The first schema change since phase 2, and the rows must survive it.
+
+    Built from tests/fixtures/schema_v1.sql -- a frozen copy extracted from git -- and never
+    from `init_db`. A migration test that constructs its "old" database by calling current
+    code is migrating v2 to v2 within one release: it passes while proving nothing, which is
+    the same defect as a snapshot test that certifies whatever it is handed.
+
+    The alternative to migrating was "delete the file and refetch", which discards
+    `first_seen_at` history and `raw_json` -- the things PLAN.md section 4 keeps so the
+    ranker can be re-run over weeks of history offline, with 3b about to change the ranker.
+    """
+    path = tmp_path / "v1.db"
+    old = sqlite3.connect(path, isolation_level=None)
+    old.executescript(fixture_text("schema_v1.sql"))
+    old.execute(
+        "INSERT INTO items (url_hash, url, title, source, first_seen_at) "
+        "VALUES ('abc', 'https://example.com/a', 'A thing', 'hn', '2026-09-01T00:00:00+00:00')"
+    )
+    old.execute(
+        "INSERT INTO sources (name, last_success_at, consecutive_failures) "
+        "VALUES ('hn', '2026-09-01T00:00:00+00:00', 2)"
+    )
+    assert old.execute("SELECT version FROM schema_version").fetchone()[0] == 1
+    old.close()
+
+    conn = init_db(path)
+    try:
+        assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == 2
+
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(sources)")}
+        assert {"last_failure_at", "total_failures"} <= columns
+
+        # Nothing lost, and the pre-existing counter is not reset by the upgrade.
+        (item,) = conn.execute("SELECT url, title FROM items").fetchall()
+        assert item["url"] == "https://example.com/a"
+
+        (record,) = get_source_health(conn)
+        assert record.name == "hn"
+        assert record.consecutive_failures == 2
+        assert record.total_failures == 0, "no history to back-fill; 0 is the honest answer"
+        assert record.last_failure_at is None
+    finally:
+        conn.close()
+
+
+def test_the_upgraded_database_then_behaves_like_a_fresh_one(tmp_path):
+    """A migrated database must not be a second-class one."""
+    path = tmp_path / "v1.db"
+    old = sqlite3.connect(path, isolation_level=None)
+    old.executescript(fixture_text("schema_v1.sql"))
+    old.close()
+
+    conn = init_db(path)
+    try:
+        record_source_health(conn, "hn", failed_at=datetime(2026, 9, 14, tzinfo=UTC))
+        (record,) = get_source_health(conn)
+        assert record.total_failures == 1
+        assert record.last_failure_at == datetime(2026, 9, 14, tzinfo=UTC)
+    finally:
+        conn.close()
+
+
+def test_migrating_is_idempotent(tmp_path):
+    path = tmp_path / "v1.db"
+    old = sqlite3.connect(path, isolation_level=None)
+    old.executescript(fixture_text("schema_v1.sql"))
+    old.close()
+
+    init_db(path).close()
+    conn = init_db(path)
+    try:
+        assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == 2
+        assert conn.execute("SELECT COUNT(*) AS n FROM schema_version").fetchone()["n"] == 1
+    finally:
+        conn.close()

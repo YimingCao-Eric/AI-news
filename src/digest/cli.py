@@ -18,7 +18,7 @@ from pathlib import Path
 from digest import store
 from digest.config import Config, ConfigError, load_config, summarise_config
 from digest.fetch import fetch_all
-from digest.models import Item, SourceHealth
+from digest.models import Item, SourceHealth, SourceOutcome
 from digest.store import StoreError
 
 DEFAULT_DB_FILENAME = "digest.db"
@@ -63,8 +63,8 @@ def _run_fetch(config: Config, args: argparse.Namespace) -> int:
 
     if args.dry_run:
         print(f"fetched {len(result.items)}, new -, dupes -  (--dry-run: nothing written)")
-        for record in result.health:
-            _log_source_line(record, result, fetched=_count_for(result.items, record.name))
+        for outcome in result.outcomes:
+            _log_source_line(outcome, result, fetched=_count_for(result.items, outcome.name))
         return 0
 
     conn = store.init_db(_db_path(args))
@@ -74,14 +74,21 @@ def _run_fetch(config: Config, args: argparse.Namespace) -> int:
 
         # Persisted per source so the run log can report per-source counts. One shared
         # `run_started_at` across every batch keeps "this run" exactly queryable.
-        for record in result.health:
-            source_items = [i for i in result.items if i.source == record.name]
+        for outcome in result.outcomes:
+            source_items = [i for i in result.items if i.source == outcome.name]
             new = store.upsert_items(conn, source_items, now=run_started_at)
-            dupes = store.count_dupes(conn, run_started_at, source=record.name)
+            dupes = store.count_dupes(conn, run_started_at, source=outcome.name)
             total_new += new
             total_dupes += dupes
-            store.record_source_health(conn, record)
-            _log_source_line(record, result, fetched=len(source_items), new=new, dupes=dupes)
+            # Both timestamps forwarded as-is: exactly one is set, so there is no outcome to
+            # deduce here. Deducing it at the call site would have moved the bug, not fixed it.
+            store.record_source_health(
+                conn,
+                outcome.name,
+                succeeded_at=outcome.succeeded_at,
+                failed_at=outcome.failed_at,
+            )
+            _log_source_line(outcome, result, fetched=len(source_items), new=new, dupes=dupes)
 
         print(f"fetched {len(result.items)}, new {total_new}, dupes {total_dupes}")
         print()
@@ -134,7 +141,7 @@ def _count_for(items: list[Item], source_name: str) -> int:
 
 
 def _log_source_line(
-    record: SourceHealth,
+    outcome: SourceOutcome,
     result: object,
     fetched: int,
     new: int | None = None,
@@ -146,15 +153,15 @@ def _log_source_line(
     has written, and fetch.py may not touch the store. The duration travels over on
     `FetchResult.durations`.
     """
-    duration = getattr(result, "durations", {}).get(record.name, 0.0)
+    duration = getattr(result, "durations", {}).get(outcome.name, 0.0)
     log.info(
         "source=%s fetched=%d new=%s dupes=%s duration=%.2fs status=%s",
-        record.name,
+        outcome.name,
         fetched,
         "-" if new is None else new,
         "-" if dupes is None else dupes,
         duration,
-        "ok" if record.consecutive_failures == 0 else "failed",
+        "ok" if outcome.succeeded else "failed",
     )
 
 

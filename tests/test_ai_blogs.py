@@ -354,7 +354,7 @@ def test_notes_survive_the_whole_source_failing(source, bodies, monkeypatch):
     result = asyncio.run(fetch_all(config))
 
     assert result.items == []
-    assert result.health[0].consecutive_failures == 1
+    assert not result.outcomes[0].succeeded
 
     notes = result.notes["ai_blogs"]
     assert len(notes) == 6, "per-feed diagnostics were lost when the source failed"

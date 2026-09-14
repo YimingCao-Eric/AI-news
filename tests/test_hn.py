@@ -268,17 +268,17 @@ def test_one_failing_source_never_aborts_the_run(monkeypatch):
     """CLAUDE.md's hardest guarantee. Untested resilience works until the first outage."""
     monkeypatch.setitem(ADAPTERS, "gh_trending", _Exploding())
     result = run_fetch_all(_config_with_enabled("hn", "gh_trending"), monkeypatch)
-    items, health = result.items, result.health
+    items = result.items
 
     assert len(items) == len(STORIES["hits"])
     assert {item.source for item in items} == {"hn"}
 
-    by_name = {record.name: record for record in health}
+    by_name = {outcome.name: outcome for outcome in result.outcomes}
     assert set(by_name) == {"hn", "gh_trending"}
-    assert by_name["hn"].consecutive_failures == 0
-    assert by_name["hn"].last_success_at is not None
-    assert by_name["gh_trending"].consecutive_failures == 1
-    assert by_name["gh_trending"].last_success_at is None
+    assert by_name["hn"].succeeded
+    assert by_name["hn"].succeeded_at is not None
+    assert not by_name["gh_trending"].succeeded
+    assert by_name["gh_trending"].failed_at is not None
 
 
 def test_http_error_is_caught_not_raised(monkeypatch):
@@ -294,31 +294,29 @@ def test_http_error_is_caught_not_raised(monkeypatch):
         lambda **kw: real_client(**{**kw, "transport": httpx.MockTransport(handler)}),
     )
     result = asyncio.run(fetch_all(_config_with_enabled("hn")))
-    items, health = result.items, result.health
 
-    assert items == []
-    assert health[0].consecutive_failures == 1
+    assert result.items == []
+    assert not result.outcomes[0].succeeded
 
 
 def test_enabled_source_without_an_adapter_is_a_recorded_failure(monkeypatch):
     """Not a silent skip: that would look identical to a source returning nothing."""
     result = run_fetch_all(_config_with_enabled("arxiv_cs_ai"), monkeypatch)
-    items, health = result.items, result.health
 
-    assert items == []
-    assert [record.name for record in health] == ["arxiv_cs_ai"]
-    assert health[0].consecutive_failures == 1
+    assert result.items == []
+    assert [outcome.name for outcome in result.outcomes] == ["arxiv_cs_ai"]
+    assert not result.outcomes[0].succeeded
 
 
-def test_disabled_sources_get_no_health_record(monkeypatch):
+def test_disabled_sources_get_no_outcome(monkeypatch):
     """sources.yaml is the single source of truth for whether a source runs."""
-    health = run_fetch_all(_config_with_enabled("hn"), monkeypatch).health
-    assert [record.name for record in health] == ["hn"]
+    outcomes = run_fetch_all(_config_with_enabled("hn"), monkeypatch).outcomes
+    assert [outcome.name for outcome in outcomes] == ["hn"]
 
 
 def test_no_enabled_sources_is_not_a_crash(monkeypatch):
     result = run_fetch_all(_config_with_enabled(), monkeypatch)
-    assert (result.items, result.health, result.durations) == ([], [], {})
+    assert (result.items, result.outcomes, result.durations) == ([], [], {})
 
 
 # --------------------------------------------------------------------------- the CLI path
