@@ -145,13 +145,14 @@ def test_every_subcommand_parses(command):
     assert build_parser().parse_args([command]).command == command
 
 
-@pytest.mark.parametrize("command", ["rank", "render", "run"])
+@pytest.mark.parametrize("command", ["rank", "run"])
 def test_stub_subcommands_still_print_the_config(command, capsys):
-    """`fetch` is excluded deliberately: it is live as of phase 1 and would hit the network.
+    """Only `rank` and `run` are stubs now -- `fetch` shipped in phase 1, `render` in phase 2.
 
-    Its CLI path is covered in test_hn.py with the transport mocked. This test used to
-    include it and silently started making real HTTP calls the moment fetch was wired up --
-    which is how a suite that claims to be offline stops being one.
+    `fetch` was excluded from this list once it went live because it would hit the network;
+    its CLI path is covered in test_hn.py with the transport mocked. That regression -- a
+    test that was offline by accident and stopped being so when the code grew underneath it
+    -- is why tests/conftest.py now blocks the network for the whole session.
     """
     assert main([command, "--config-dir", str(REPO_ROOT)]) == 0
     assert "not implemented" in capsys.readouterr().out

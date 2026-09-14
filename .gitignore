@@ -31,6 +31,9 @@ htmlcov/
 # between runs, at which point this line has to come out.
 *.db
 *.db-journal
+# WAL mode sidecars. Normally removed on a clean close, but they survive a killed process.
+*.db-wal
+*.db-shm
 *.sqlite3
 
 # NOT ignored: digests/
