@@ -1,0 +1,138 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<rss xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0">
+  <channel>
+    <title>Anthropic Research</title>
+    <link>https://www.anthropic.com/research</link>
+    <description>Latest research from Anthropic</description>
+    <atom:link href="https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_anthropic_research.xml" rel="self"/>
+    <docs>http://www.rssboard.org/rss-specification</docs>
+    <generator>python-feedgen</generator>
+    <image>
+      <url>https://www.anthropic.com/images/icons/apple-touch-icon.png</url>
+      <title>Anthropic Research</title>
+      <link>https://www.anthropic.com/research</link>
+    </image>
+    <language>en</language>
+    <lastBuildDate>Mon, 14 Sep 2026 16:38:25 +0000</lastBuildDate>
+    <item>
+      <title>Sep 10, 2026Frontier Red TeamMeasuring tactical intelligence targeting and conventional weapons capabilities of AI models</title>
+      <link>https://www.anthropic.com/research/intelligence-targeting-conventional-weapons-capabilities</link>
+      <description>Sep 10, 2026Frontier Red TeamMeasuring tactical intelligence targeting and conventional weapons capabilities of AI models</description>
+      <guid isPermaLink="false">https://www.anthropic.com/research/intelligence-targeting-conventional-weapons-capabilities</guid>
+      <category>Research</category>
+      <pubDate>Thu, 10 Sep 2026 00:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>AlignmentSep 9, 2026An alignment assessment of recent cybersecurity incidentsWe present an alignment assessment of four incidents in which Claude models gained unauthorized access to real third-party systems.</title>
+      <link>https://www.anthropic.com/research/alignment-assessment-cybersecurity-incidents</link>
+      <description>AlignmentSep 9, 2026An alignment assessment of recent cybersecurity incidentsWe present an alignment assessment of four incidents in which Claude models gained unauthorized access to real third-party systems.</description>
+      <guid isPermaLink="false">https://www.anthropic.com/research/alignment-assessment-cybersecurity-incidents</guid>
+      <category>Research</category>
+      <pubDate>Wed, 09 Sep 2026 00:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>ScienceSep 4, 2026Formalizing Fermat's Last Theorem We are sharing the first complete computer-checked proof of Fermat’s Last Theorem. Claude worked largely autonomously over 11 days to write the proof in the Lean programming language.</title>
+      <link>https://www.anthropic.com/research/formalizing-fermats-last-theorem</link>
+      <description>ScienceSep 4, 2026Formalizing Fermat's Last Theorem We are sharing the first complete computer-checked proof of Fermat’s Last Theorem. Claude worked largely autonomously over 11 days to write the proof in the Lean programming language.</description>
+      <guid isPermaLink="false">https://www.anthropic.com/research/formalizing-fermats-last-theorem</guid>
+      <category>Research</category>
+      <pubDate>Fri, 04 Sep 2026 00:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Aug 28, 2026AlignmentAutomated researchers can reliably mitigate alignment failures</title>
+      <link>https://www.anthropic.com/research/automated-researchers-mitigate-alignment-failures</link>
+      <description>Aug 28, 2026AlignmentAutomated researchers can reliably mitigate alignment failures</description>
+      <guid isPermaLink="false">https://www.anthropic.com/research/automated-researchers-mitigate-alignment-failures</guid>
+      <category>Research</category>
+      <pubDate>Fri, 28 Aug 2026 00:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Aug 26, 2026Societal ImpactsEnabling independent research on how people use Claude</title>
+      <link>https://www.anthropic.com/research/enabling-independent-research</link>
+      <description>Aug 26, 2026Societal ImpactsEnabling independent research on how people use Claude</description>
+      <guid isPermaLink="false">https://www.anthropic.com/research/enabling-independent-research</guid>
+      <category>Research</category>
+      <pubDate>Wed, 26 Aug 2026 00:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>ScienceAug 18, 2026How Claude is accelerating protein design and analytical chemistryIn this post, we share two results that show how Claude can help life scientists increase the pace of their research.</title>
+      <link>https://www.anthropic.com/research/Claude-accelerates-protein-design</link>
+      <description>ScienceAug 18, 2026How Claude is accelerating protein design and analytical chemistryIn this post, we share two results that show how Claude can help life scientists increase the pace of their research.</description>
+      <guid isPermaLink="false">https://www.anthropic.com/research/Claude-accelerates-protein-design</guid>
+      <category>Research</category>
+      <pubDate>Tue, 18 Aug 2026 00:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Aug 13, 2026Frontier Red TeamPatterns and problems in emerging multiagent systems</title>
+      <link>https://www.anthropic.com/research/multiagent-systems</link>
+      <description>Aug 13, 2026Frontier Red TeamPatterns and problems in emerging multiagent systems</description>
+      <guid isPermaLink="false">https://www.anthropic.com/research/multiagent-systems</guid>
+      <category>Research</category>
+      <pubDate>Thu, 13 Aug 2026 00:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Aug 12, 2026EconomicsReviewing the evidence on worker retraining programs</title>
+      <link>https://www.anthropic.com/research/reviewing-the-evidence-on-worker-retraining-programs</link>
+      <description>Aug 12, 2026EconomicsReviewing the evidence on worker retraining programs</description>
+      <guid isPermaLink="false">https://www.anthropic.com/research/reviewing-the-evidence-on-worker-retraining-programs</guid>
+      <category>Research</category>
+      <pubDate>Wed, 12 Aug 2026 00:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>ScienceAug 10, 2026Learning more about Claude's mathematical capabilitiesAn unreleased research version of Claude has made strides on a problem related to the Riemann hypothesis.</title>
+      <link>https://www.anthropic.com/research/riemann-zeta</link>
+      <description>ScienceAug 10, 2026Learning more about Claude's mathematical capabilitiesAn unreleased research version of Claude has made strides on a problem related to the Riemann hypothesis.</description>
+      <guid isPermaLink="false">https://www.anthropic.com/research/riemann-zeta</guid>
+      <category>Research</category>
+      <pubDate>Mon, 10 Aug 2026 00:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Jul 28, 2026Frontier Red TeamDiscovering cryptographic weaknesses with Claude</title>
+      <link>https://www.anthropic.com/research/discovering-cryptographic-weaknesses</link>
+      <description>Jul 28, 2026Frontier Red TeamDiscovering cryptographic weaknesses with Claude</description>
+      <guid isPermaLink="false">https://www.anthropic.com/research/discovering-cryptographic-weaknesses</guid>
+      <category>Research</category>
+      <pubDate>Tue, 28 Jul 2026 00:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Interpretability</title>
+      <link>https://www.anthropic.com/research/team/interpretability</link>
+      <description>Interpretability</description>
+      <guid isPermaLink="false">https://www.anthropic.com/research/team/interpretability</guid>
+      <category>Research</category>
+      <pubDate>Sat, 11 Nov 2023 00:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Economics</title>
+      <link>https://www.anthropic.com/research/team/economics</link>
+      <description>Economics</description>
+      <guid isPermaLink="false">https://www.anthropic.com/research/team/economics</guid>
+      <category>Research</category>
+      <pubDate>Fri, 16 Jun 2023 00:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Frontier Red Team</title>
+      <link>https://www.anthropic.com/research/team/frontier-red-team</link>
+      <description>Frontier Red Team</description>
+      <guid isPermaLink="false">https://www.anthropic.com/research/team/frontier-red-team</guid>
+      <category>Research</category>
+      <pubDate>Wed, 14 Jun 2023 00:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Societal Impacts</title>
+      <link>https://www.anthropic.com/research/team/societal-impacts</link>
+      <description>Societal Impacts</description>
+      <guid isPermaLink="false">https://www.anthropic.com/research/team/societal-impacts</guid>
+      <category>Research</category>
+      <pubDate>Sat, 20 May 2023 00:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Alignment</title>
+      <link>https://www.anthropic.com/research/team/alignment</link>
+      <description>Alignment</description>
+      <guid isPermaLink="false">https://www.anthropic.com/research/team/alignment</guid>
+      <category>Research</category>
+      <pubDate>Wed, 05 Apr 2023 00:00:00 +0000</pubDate>
+    </item>
+  </channel>
+</rss>

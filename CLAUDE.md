@@ -32,6 +32,32 @@ Corollary, for a temptation that will arrive: **do not exempt four-digit years f
 numeric guard.** "CES 2026" and "CES 2027" really are different events. The exemption buys
 back a dangerous false-positive class to fix a harmless false-negative one.
 
+### The companion rule: what an adapter does with zero items
+
+A 200 response that parses cleanly and contains nothing is the ambiguous case every adapter
+hits eventually. The rule:
+
+> **Raise when zero means "we no longer understand this endpoint". Return `[]` when zero is a
+> state the source can genuinely be in.**
+
+An empty list is indistinguishable from a quiet day, so returning one for a broken endpoint
+is exactly the silent rot the health footer cannot catch. Raising for a genuinely quiet
+source is the opposite error and merely noisy. Decide per adapter, and write down which:
+
+| adapter | zero items | why |
+|---|---|---|
+| `gh_trending` | **raise** | always ~20 rows; zero means selector rot or a 403 body |
+| `hf_papers` | **raise** | a fixed daily curated list; zero means the shape changed |
+| `arxiv` | `[]` + warn, but **raise** if feedparser sets `bozo` | genuinely empty some weekends |
+| `ai_blogs` | `[]` per feed; **raise** if every feed yields nothing | one quiet blog is normal, six is not |
+| `hn` | `[]` | a quiet 48h above 100 points is rare but real |
+
+**Staleness is the third state**, and the one that bites hardest: a feed can return 200 with
+well-formed XML whose newest item is four months old. Three of six `ai_blogs` feeds were in
+exactly that state when phase 3a measured them. Per-feed staleness thresholds live in
+`adapters/ai_blogs.py`; a global threshold either cries wolf on slow feeds or sleeps through
+fast ones, and a warning that cries wolf gets ignored, which costs the whole mechanism.
+
 ## Hard constraints
 - No web framework, no server, no Docker, no task queue, no Celery.
 - No new third-party dependency without asking the user first.

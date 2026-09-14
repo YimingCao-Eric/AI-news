@@ -1,0 +1,163 @@
+"""arXiv category RSS. One adapter serves several categories via the source's `feeds`.
+
+The highest-volume source in the project by a wide margin. Measured 2026-09-14: cs.AI 270
+entries, cs.CL 115, cs.MA 16 -- five times the ~50/day the plan assumed.
+"""
+
+import asyncio
+import re
+from datetime import UTC, datetime
+
+import feedparser
+import httpx
+from feedparser.util import FeedParserDict
+
+from digest.adapters.base import Adapter
+from digest.config import Feed, Source
+from digest.models import Item
+
+#: arXiv marks each entry with why it appeared. `new` is a first announcement and `cross` is
+#: a first announcement in an additional category; both are new work to a reader.
+#: `replace` / `replace-cross` are v2+ revisions of papers that may be months old, and they
+#: were 38% of cs.AI on 2026-09-14 (replace-cross 72, replace 31, out of 270). Letting a
+#: revision into the digest as if it were fresh is the quiet kind of wrongness that makes
+#: you stop trusting the whole thing.
+#:
+#: Cross-listings that arrive twice through different categories share an arXiv URL, so
+#: `store.url_hash` already collapses them -- no extra work needed here.
+KEPT_ANNOUNCE_TYPES = frozenset({"new", "cross"})
+
+#: Defensive only. arXiv's *current* RSS carries clean titles -- 0 of 270 cs.AI entries had
+#: this prefix, a newline, or a double space when measured on 2026-09-14; the `arXiv:ID
+#: Announce Type:` text lives in `description`, not `title`. Older arXiv feed formats did put
+#: it in the title, so the strip stays as a guard, tested against a synthetic entry. It is
+#: not a hazard present in today's data, and saying otherwise would be inventing one.
+_ARXIV_TITLE_PREFIX = re.compile(r"^\s*arXiv:\s*\d{4}\.\d{4,5}(v\d+)?\s*(\[[^\]]*\])?\s*[:\-]?\s*")
+
+_WHITESPACE = re.compile(r"\s+")
+
+#: Per-feed budget. The outer 20s in fetch.py covers the whole source; without this, one slow
+#: category could spend it all and cost the other two.
+FEED_TIMEOUT_SECONDS = 10.0
+
+
+class ArxivAdapter(Adapter):
+    name = "arxiv_cs_ai"
+
+    def __init__(self) -> None:
+        self._notes: list[str] = []
+
+    def drain_notes(self) -> list[str]:
+        notes, self._notes = self._notes, []
+        return notes
+
+    async def fetch(self, client: httpx.AsyncClient, source: Source) -> list[Item]:
+        self._notes = []
+        feeds = source.endpoints
+
+        results = await asyncio.gather(
+            *(self._fetch_feed(client, feed, source.name) for feed in feeds),
+            return_exceptions=True,
+        )
+
+        per_feed: list[list[Item]] = []
+        failures = 0
+        for feed, result in zip(feeds, results, strict=True):
+            if isinstance(result, BaseException):
+                if not isinstance(result, Exception):
+                    raise result
+                failures += 1
+                self._notes.append(f"{feed.name}: FAILED {type(result).__name__}: {result}")
+                continue
+            per_feed.append(result)
+            self._notes.append(f"{feed.name}: {len(result)} new/cross")
+
+        if failures == len(feeds):
+            raise RuntimeError(
+                f"{source.name}: every category failed ({failures}/{len(feeds)}). "
+                f"Notes: {'; '.join(self._notes)}"
+            )
+
+        items = _round_robin(per_feed)
+        if source.fetch_limit is not None:
+            items = items[: source.fetch_limit]
+        return items
+
+    async def _fetch_feed(
+        self, client: httpx.AsyncClient, feed: Feed, source_name: str
+    ) -> list[Item]:
+        async with asyncio.timeout(FEED_TIMEOUT_SECONDS):
+            response = await client.get(feed.url)
+        response.raise_for_status()
+
+        parsed = feedparser.parse(response.text)
+        if parsed.bozo and not parsed.entries:
+            # Malformed XML *and* nothing parsed: we no longer understand this endpoint.
+            raise ValueError(
+                f"{source_name}/{feed.name}: {feed.url} returned unparseable XML "
+                f"({parsed.bozo_exception}). Zero entries from a broken document is not a "
+                f"quiet day."
+            )
+
+        # A genuinely empty category is possible -- arXiv does not announce every day -- so
+        # this returns [] rather than raising. The count reaches the summary via notes.
+        return [
+            item
+            for entry in parsed.entries
+            if entry.get("arxiv_announce_type", "new") in KEPT_ANNOUNCE_TYPES
+            and (item := _item_from_entry(entry, source_name, feed.name)) is not None
+        ]
+
+
+def _round_robin(per_feed: list[list[Item]]) -> list[Item]:
+    """Interleave categories rather than concatenating them.
+
+    `fetch_limit` is set high enough to cover everything eligible, so this normally changes
+    nothing. It matters on the day the cap *does* bind: concatenated, cs.AI's 270 entries
+    would consume the budget and cs.MA's 16 -- the multi-agent category, which is the one
+    that actually matches the interest profile -- would never be stored at all. Round-robin
+    makes a binding cap fail fairly instead of alphabetically.
+    """
+    merged: list[Item] = []
+    for row in zip(*per_feed, strict=False):
+        merged.extend(row)
+    # zip() stops at the shortest feed; append whatever the longer ones still hold.
+    shortest = min((len(f) for f in per_feed), default=0)
+    for feed_items in per_feed:
+        merged.extend(feed_items[shortest:])
+    return merged
+
+
+def clean_title(title: str) -> str:
+    """Strip the (currently absent) `arXiv:ID` prefix and normalise whitespace."""
+    return _WHITESPACE.sub(" ", _ARXIV_TITLE_PREFIX.sub("", title)).strip()
+
+
+def _item_from_entry(entry: FeedParserDict, source_name: str, feed_name: str) -> Item | None:
+    title = entry.get("title")
+    link = entry.get("link")
+    if not title or not link:
+        return None
+
+    raw = dict(entry)
+    raw["feed_name"] = feed_name
+
+    return Item(
+        url=link,
+        title=clean_title(title),
+        source=source_name,
+        author=entry.get("author"),
+        published_at=_published_at(entry),
+        # The abstract stays in `summary` here, untouched. CLAUDE.md forbids fetching or
+        # summarising bodies; keeping the one the feed already gave us costs nothing and is
+        # what phase 4 will re-score against.
+        raw=raw,
+    )
+
+
+def _published_at(entry: FeedParserDict) -> datetime | None:
+    """feedparser hands back a naive struct_time in UTC; Item rejects naive values."""
+    parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+    if parsed is None:
+        return None
+    return datetime(*parsed[:6], tzinfo=UTC)
