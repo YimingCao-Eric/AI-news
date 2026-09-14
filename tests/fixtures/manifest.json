@@ -1,0 +1,11 @@
+{
+  "captured_at": "2026-09-14T16:42:28+00:00",
+  "sources": [
+    "ai_blogs",
+    "arxiv",
+    "gh_trending",
+    "hf_papers",
+    "hn"
+  ],
+  "note": "captured_at pins the clock for scripts/snapshot_pipeline.py. Time-windowed adapters (ai_blogs MAX_ENTRY_AGE_DAYS) produce a different row set as fixtures age, so the snapshot is only reproducible against this instant."
+}

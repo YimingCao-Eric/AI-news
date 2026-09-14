@@ -57,6 +57,21 @@ MAX_ENTRY_AGE_DAYS = 30
 _WHITESPACE = re.compile(r"\s+")
 
 
+def _now() -> datetime:
+    """The wall clock, behind one indirection so an offline harness can pin it.
+
+    MAX_ENTRY_AGE_DAYS is measured against this, so without a seam the adapter produces a
+    different row set from the *same* recorded fixtures as the fixtures age -- 112 items
+    today, zero thirty days from now. scripts/snapshot_pipeline.py patches this to the
+    fixture capture instant, which is what makes the pipeline snapshot reproducible.
+
+    NOTE FOR R1 (vocabulary pass): this is a module-level patch point, while phase 2's
+    store takes the same concern as a parameter (`upsert_items(now=...)`). Two idioms for
+    one thing. Both work; pick one deliberately rather than by accretion.
+    """
+    return datetime.now(tz=UTC)
+
+
 @dataclass(frozen=True)
 class FeedOutcome:
     """One feed's result. Separates "nothing recent" from "nothing at all".
@@ -87,7 +102,7 @@ class AIBlogsAdapter(Adapter):
     async def fetch(self, client: httpx.AsyncClient, source: Source) -> list[Item]:
         self._notes = []
         feeds = source.endpoints
-        now = datetime.now(tz=UTC)
+        now = _now()
 
         results = await asyncio.gather(
             *(self._fetch_feed(client, feed, source.name, now) for feed in feeds),

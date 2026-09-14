@@ -31,6 +31,15 @@ TIMEOUT = 30.0
 
 ARXIV_CATEGORIES = ("cs.AI", "cs.CL", "cs.MA")
 
+#: Written on every run. The pipeline snapshot pins its clock to `captured_at` from here.
+#:
+#: This is not decoration. `ai_blogs` filters entries against `now - MAX_ENTRY_AGE_DAYS`,
+#: so a snapshot generated with a hardcoded date would produce zero rows once the fixtures
+#: aged past the cutoff -- a snapshot of nothing, produced by a test that passes. Deriving
+#: the pinned clock from the fixture set means re-recording updates it as a side effect,
+#: rather than as something someone has to remember.
+MANIFEST_FILENAME = "manifest.json"
+
 
 def _client() -> httpx.Client:
     return httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT, follow_redirects=True)
@@ -108,6 +117,28 @@ def record_ai_blogs(client: httpx.Client) -> None:
         _write(f"ai_blogs_{feed['name']}.xml", response.text)
 
 
+def write_manifest(sources: list[str], captured_at: datetime) -> None:
+    """Record when this fixture set was captured, and from which sources."""
+    manifest = {
+        "captured_at": captured_at.astimezone(UTC).isoformat(),
+        "sources": sorted(sources),
+        "note": (
+            "captured_at pins the clock for scripts/snapshot_pipeline.py. Time-windowed "
+            "adapters (ai_blogs MAX_ENTRY_AGE_DAYS) produce a different row set as "
+            "fixtures age, so the snapshot is only reproducible against this instant."
+        ),
+    }
+    _write(MANIFEST_FILENAME, json.dumps(manifest, indent=2) + "\n")
+
+
+def newest_fixture_mtime() -> datetime:
+    """Capture instant for a fixture set recorded before manifests existed."""
+    files = [p for p in FIXTURES.glob("*") if p.name != MANIFEST_FILENAME]
+    if not files:
+        raise SystemExit("no fixtures to stamp")
+    return datetime.fromtimestamp(max(p.stat().st_mtime for p in files), tz=UTC)
+
+
 def record_gh_trending(client: httpx.Client) -> None:
     response = _get(client, "https://github.com/trending?since=daily&spoken_language_code=en")
     _write("gh_trending.html", response.text)
@@ -136,11 +167,25 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Source to record; repeatable. One of: {', '.join(RECORDERS)}, all.",
     )
     parser.add_argument("--list", action="store_true", help="List recordable sources and exit.")
+    parser.add_argument(
+        "--manifest-only",
+        action="store_true",
+        help=(
+            "Write manifest.json for the fixtures already on disk, without fetching. "
+            "For a set recorded before manifests existed; captured_at comes from the "
+            "newest fixture mtime."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.list:
         for name in RECORDERS:
             print(name)
+        return 0
+    if args.manifest_only:
+        captured_at = newest_fixture_mtime()
+        write_manifest(list(RECORDERS), captured_at)
+        print(f"stamped existing fixtures: captured_at={captured_at.isoformat()}")
         return 0
     if not args.source:
         parser.error("--source is required (or --list)")
@@ -148,6 +193,7 @@ def main(argv: list[str] | None = None) -> int:
     names = list(RECORDERS) if "all" in args.source else list(dict.fromkeys(args.source))
 
     failures: list[str] = []
+    started_at = datetime.now(tz=UTC)
     with _client() as client:
         for name in names:
             print(f"\n[{name}]")
@@ -157,6 +203,10 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:
                 print(f"  FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
                 failures.append(name)
+
+    # Written even on partial failure: the manifest describes the fixture set on disk, and
+    # a half-refreshed set still needs its clock pinned to when it was captured.
+    write_manifest(names, started_at)
 
     print(f"\nrecorded {len(names) - len(failures)}/{len(names)} source(s)")
     if failures:
