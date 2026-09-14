@@ -267,7 +267,8 @@ def run_fetch_all(config: Config, monkeypatch, payload: dict = STORIES):
 def test_one_failing_source_never_aborts_the_run(monkeypatch):
     """CLAUDE.md's hardest guarantee. Untested resilience works until the first outage."""
     monkeypatch.setitem(ADAPTERS, "gh_trending", _Exploding())
-    items, health = run_fetch_all(_config_with_enabled("hn", "gh_trending"), monkeypatch)
+    result = run_fetch_all(_config_with_enabled("hn", "gh_trending"), monkeypatch)
+    items, health = result.items, result.health
 
     assert len(items) == len(STORIES["hits"])
     assert {item.source for item in items} == {"hn"}
@@ -292,7 +293,8 @@ def test_http_error_is_caught_not_raised(monkeypatch):
         "AsyncClient",
         lambda **kw: real_client(**{**kw, "transport": httpx.MockTransport(handler)}),
     )
-    items, health = asyncio.run(fetch_all(_config_with_enabled("hn")))
+    result = asyncio.run(fetch_all(_config_with_enabled("hn")))
+    items, health = result.items, result.health
 
     assert items == []
     assert health[0].consecutive_failures == 1
@@ -300,7 +302,8 @@ def test_http_error_is_caught_not_raised(monkeypatch):
 
 def test_enabled_source_without_an_adapter_is_a_recorded_failure(monkeypatch):
     """Not a silent skip: that would look identical to a source returning nothing."""
-    items, health = run_fetch_all(_config_with_enabled("arxiv_cs_ai"), monkeypatch)
+    result = run_fetch_all(_config_with_enabled("arxiv_cs_ai"), monkeypatch)
+    items, health = result.items, result.health
 
     assert items == []
     assert [record.name for record in health] == ["arxiv_cs_ai"]
@@ -309,18 +312,19 @@ def test_enabled_source_without_an_adapter_is_a_recorded_failure(monkeypatch):
 
 def test_disabled_sources_get_no_health_record(monkeypatch):
     """sources.yaml is the single source of truth for whether a source runs."""
-    _, health = run_fetch_all(_config_with_enabled("hn"), monkeypatch)
+    health = run_fetch_all(_config_with_enabled("hn"), monkeypatch).health
     assert [record.name for record in health] == ["hn"]
 
 
 def test_no_enabled_sources_is_not_a_crash(monkeypatch):
-    assert run_fetch_all(_config_with_enabled(), monkeypatch) == ([], [])
+    result = run_fetch_all(_config_with_enabled(), monkeypatch)
+    assert (result.items, result.health, result.durations) == ([], [], {})
 
 
 # --------------------------------------------------------------------------- the CLI path
 
 
-def test_cli_fetch_prints_items_and_health_footer(monkeypatch, capsys):
+def test_cli_fetch_prints_items_and_health_footer(monkeypatch, capsys, tmp_path):
     real_client = httpx.AsyncClient
     monkeypatch.setattr(
         httpx,
@@ -328,16 +332,16 @@ def test_cli_fetch_prints_items_and_health_footer(monkeypatch, capsys):
         lambda **kw: real_client(**{**kw, "transport": _mock_transport(STORIES)}),
     )
 
-    assert main(["fetch", "--config-dir", str(REPO_ROOT)]) == 0
+    assert main(["fetch", "--config-dir", str(REPO_ROOT), "--db", str(tmp_path / "t.db")]) == 0
 
     out = capsys.readouterr().out
     lines = out.splitlines()
     assert len(STORIES["hits"]) == sum(line.startswith("[hn] ") for line in lines)
-    assert f"{len(STORIES['hits'])} items from 1 enabled source(s):" in out
+    assert f"fetched {len(STORIES['hits'])}, new {len(STORIES['hits'])}, dupes 0" in out
     assert "hn" in out and "ok" in out
 
 
-def test_cli_fetch_survives_a_dead_source(monkeypatch, capsys):
+def test_cli_fetch_survives_a_dead_source(monkeypatch, capsys, tmp_path):
     """The footer has to *say* a source failed -- silence is how a dead feed rots unnoticed."""
     monkeypatch.setitem(ADAPTERS, "gh_trending", _Exploding())
     monkeypatch.setattr(
@@ -350,14 +354,14 @@ def test_cli_fetch_survives_a_dead_source(monkeypatch, capsys):
         lambda **kw: real_client(**{**kw, "transport": _mock_transport(STORIES)}),
     )
 
-    assert main(["fetch", "--config-dir", str(REPO_ROOT)]) == 0
+    assert main(["fetch", "--config-dir", str(REPO_ROOT), "--db", str(tmp_path / "t.db")]) == 0
     out = capsys.readouterr().out
     assert "FAILED" in out
     assert "gh_trending" in out
     assert sum(line.startswith("[hn] ") for line in out.splitlines()) == len(STORIES["hits"])
 
 
-def test_cli_survives_a_title_the_console_codepage_cannot_encode(monkeypatch, capsys):
+def test_cli_survives_a_title_the_console_codepage_cannot_encode(monkeypatch, capsys, tmp_path):
     """Windows stdout defaults to cp1252; a CJK or emoji headline would otherwise crash."""
     hit = {**STORIES["hits"][0], "title": "中文 model release \U0001f680"}
     real_client = httpx.AsyncClient
@@ -367,7 +371,7 @@ def test_cli_survives_a_title_the_console_codepage_cannot_encode(monkeypatch, ca
         lambda **kw: real_client(**{**kw, "transport": _mock_transport({"hits": [hit]})}),
     )
 
-    assert main(["fetch", "--config-dir", str(REPO_ROOT)]) == 0
+    assert main(["fetch", "--config-dir", str(REPO_ROOT), "--db", str(tmp_path / "t.db")]) == 0
     assert "model release" in capsys.readouterr().out
 
 

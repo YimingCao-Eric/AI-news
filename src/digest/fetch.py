@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import httpx
@@ -20,6 +21,23 @@ from digest.config import Config, Source
 from digest.models import Item, SourceHealth
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class FetchResult:
+    """What one run of `fetch_all` produced.
+
+    A named object rather than a tuple: this return value has already grown once (durations,
+    so the caller can emit CLAUDE.md's one-line-per-source log *after* persisting, which is
+    the only point at which the "new items" count exists), and there are several call sites.
+    A tuple that has grown once grows again.
+    """
+
+    items: list[Item] = field(default_factory=list)
+    health: list[SourceHealth] = field(default_factory=list)
+    #: Wall-clock seconds per source name. Measured here because only the fetch loop sees it.
+    durations: dict[str, float] = field(default_factory=dict)
+
 
 #: Adapters by the source name in sources.yaml they serve. Phase 3 adds the other four.
 ADAPTERS: dict[str, Adapter] = {adapter.name: adapter for adapter in (HNAdapter(),)}
@@ -41,7 +59,9 @@ def user_agent() -> str:
     return os.environ.get("DIGEST_USER_AGENT") or DEFAULT_USER_AGENT
 
 
-async def _fetch_one(client: httpx.AsyncClient, source: Source) -> tuple[list[Item], SourceHealth]:
+async def _fetch_one(
+    client: httpx.AsyncClient, source: Source
+) -> tuple[list[Item], SourceHealth, float]:
     """Fetch one source. Never raises: every failure becomes a health record."""
     started = time.monotonic()
     items: list[Item] = []
@@ -68,37 +88,28 @@ async def _fetch_one(client: httpx.AsyncClient, source: Source) -> tuple[list[It
     if error is None:
         health = SourceHealth(name=source.name, last_success_at=datetime.now(tz=UTC))
     else:
-        # Genuinely *consecutive* failures need the previously stored count, which arrives
-        # with the store in phase 2. Until then this is 1 for "failed on this run", not a
-        # running total -- honest about the current run and no more.
+        # A flag, not a count. `store.record_source_health` owns the real consecutive-failure
+        # counter, because only it can see the previous value.
         health = SourceHealth(name=source.name, consecutive_failures=1)
 
-    # CLAUDE.md: one line per source per run -- name, items fetched, new items, duration,
-    # ok/failed. "new" needs the database to mean anything, so it is `-` until phase 2.
-    log.info(
-        "source=%s fetched=%d new=%s duration=%.2fs status=%s%s",
-        source.name,
-        len(items),
-        "-",
-        duration,
-        "ok" if error is None else "failed",
-        "" if error is None else f" error={error}",
-    )
-    return items, health
+    # CLAUDE.md's one-line-per-source run log is emitted by the caller, not here: the "new
+    # items" column only exists after the store has written, and fetch.py is not allowed to
+    # touch the store. `durations` on FetchResult is how the timing reaches it.
+    return items, health, duration
 
 
-async def fetch_all(config: Config) -> tuple[list[Item], list[SourceHealth]]:
+async def fetch_all(config: Config) -> FetchResult:
     """Fetch every enabled source concurrently.
 
-    Returns everything that succeeded plus a health record per source, in config order.
-    Sources that are disabled in sources.yaml are not fetched and get no health record --
-    the config is the single source of truth for whether a source runs, which is why
-    `SourceHealth` no longer carries an `enabled` flag of its own.
+    Returns everything that succeeded plus a health record and a duration per source, in
+    config order. Sources that are disabled in sources.yaml are not fetched and get no health
+    record -- the config is the single source of truth for whether a source runs, which is
+    why `SourceHealth` has no `enabled` flag of its own.
     """
     sources = config.sources.enabled
     if not sources:
         log.warning("no sources are enabled in sources.yaml; nothing to fetch")
-        return [], []
+        return FetchResult()
 
     headers = {"User-Agent": user_agent()}
     timeout = httpx.Timeout(SOURCE_TIMEOUT_SECONDS)
@@ -110,6 +121,7 @@ async def fetch_all(config: Config) -> tuple[list[Item], list[SourceHealth]]:
 
     items: list[Item] = []
     health: list[SourceHealth] = []
+    durations: dict[str, float] = {}
     for source, result in zip(sources, results, strict=True):
         if isinstance(result, BaseException):
             if not isinstance(result, Exception):
@@ -122,9 +134,11 @@ async def fetch_all(config: Config) -> tuple[list[Item], list[SourceHealth]]:
             # bug in the wrapper itself. Still must not abort the run.
             log.error("source %s failed outside the adapter wrapper", source.name, exc_info=result)
             health.append(SourceHealth(name=source.name, consecutive_failures=1))
+            durations[source.name] = 0.0
             continue
-        source_items, source_health = result
+        source_items, source_health, duration = result
         items.extend(source_items)
         health.append(source_health)
+        durations[source.name] = duration
 
-    return items, health
+    return FetchResult(items=items, health=health, durations=durations)

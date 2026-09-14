@@ -174,16 +174,33 @@ CREATE TABLE items (
   score_reason   TEXT,
   summary        TEXT,
   digest_date    TEXT,                   -- which digest it appeared in, NULL if never shown
-  feedback       INTEGER DEFAULT 0       -- -1 / 0 / +1, set by you
+  feedback       INTEGER DEFAULT 0,      -- -1 / 0 / +1, set by you
+  dupe_of        TEXT                    -- url_hash of the item this near-duplicates
 );
 CREATE INDEX idx_items_digest ON items(digest_date);
 CREATE INDEX idx_items_seen   ON items(first_seen_at);
+CREATE INDEX idx_items_dupe   ON items(dupe_of);
 
 CREATE TABLE sources (
   name TEXT PRIMARY KEY, kind TEXT, url TEXT, etag TEXT, last_modified TEXT,
-  last_success_at TEXT, consecutive_failures INTEGER DEFAULT 0, enabled INTEGER DEFAULT 1
+  last_success_at TEXT, consecutive_failures INTEGER DEFAULT 0
 );
 ```
+
+**Amended in phase 2, deliberately — do not "restore" these from an earlier draft:**
+
+- `dupe_of` added. Near-duplicates are stored and flagged rather than dropped, so it stays
+  possible to see what got collapsed. A column rather than a key inside `raw_json`, because
+  `raw` is the source's payload verbatim and writing our own marker into it would break that.
+- `sources.enabled` **removed**. `sources.yaml` is the single source of truth for whether a
+  source runs — the same reason `SourceHealth` carries no `enabled` field. A column nothing
+  reads is worse than an absent one: eventually something reads it and the two disagree. If
+  auto-disable-after-N-failures ever ships it arrives as `auto_disabled_at`, a name that
+  cannot be mistaken for config intent.
+- `digest_date` is what defines "new": `new_items()` selects `digest_date IS NULL`, never a
+  comparison against today's date. `first_seen_at` is UTC while the digest day is
+  America/Vancouver, so a 07:00 local run at 14:00 UTC would split one morning across two UTC
+  days; and a missed run would lose those items permanently instead of catching up.
 
 Keeping `raw_json` is the single most useful decision in this schema: when you change the ranker in
 week 3 you can re-score three weeks of history offline instead of waiting three weeks to see if the
@@ -281,6 +298,13 @@ weekend, 4–5 over the following two weeks, 6+ only if you still want it.
 - Delivery: write `digests/YYYY-MM-DD.md` to the repo; then one push channel — Pushover (the course
   uses it in LLM Eng W8 D3 / Agents W1 D5, so it doubles as coursework) or plain SMTP email.
 - Retry/backoff on fetch; never let one dead source fail the job.
+- ⚠️ **If you commit `digest.db` back from a GitHub Action: checkpoint the WAL first.** The
+  store opens SQLite in WAL mode, so a run's most recent transactions can still be sitting in
+  the `digest.db-wal` sidecar when the commit step runs. Committing the `.db` alone then
+  produces a database that is silently *behind* — it opens fine, looks fine, and is missing
+  the last run. Either `PRAGMA wal_checkpoint(TRUNCATE)` before committing, or guarantee a
+  clean `conn.close()` and commit the sidecars too. This is exactly the failure mode the
+  source-health footer cannot catch, because the run itself succeeded.
 - **Done when:** it has run unattended for seven consecutive days with no manual intervention.
 
 ### Phase 6 — Quality loop (ongoing, optional)

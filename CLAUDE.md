@@ -13,6 +13,25 @@ making design decisions; do not re-derive the architecture.
 - CLI: stdlib `argparse`. No Typer/Click.
 - Tests: pytest, fixtures only.
 
+## Guiding principle — when in doubt, fail toward the visible error
+
+Where a design choice trades one kind of mistake for another, choose the one you will
+*notice*. A visible wrong answer gets corrected; an invisible one becomes the new normal.
+
+This governs at least two subsystems already, and the reasoning is the same in both:
+
+- **URL canonicalisation** strips only unambiguously tracking query params. A false *split*
+  shows a story twice — you shrug. A false *collapse* drops an item through
+  `INSERT OR IGNORE`: no row, no log, and the only symptom is missing something you never
+  knew existed. That asymmetry is why `source` is not stripped.
+- **Near-duplicate detection** requires identical numeric tokens on top of the Dice ratio.
+  It means "at CES 2027" and "at CES" read as different stories — a false negative, so you
+  see the item twice. The alternative silently merges two different product announcements.
+
+Corollary, for a temptation that will arrive: **do not exempt four-digit years from the
+numeric guard.** "CES 2026" and "CES 2027" really are different events. The exemption buys
+back a dangerous false-positive class to fix a harmless false-negative one.
+
 ## Hard constraints
 - No web framework, no server, no Docker, no task queue, no Celery.
 - No new third-party dependency without asking the user first.
@@ -47,6 +66,12 @@ fetch → normalise → store → rank → summarise → render → deliver
 - Every module gets a `--dry-run`-able CLI path where it makes sense.
 - Log one line per source per run: name, items fetched, new items, duration, ok/failed.
 - Type hints everywhere; run `ruff` before declaring done.
+- Where a guard exists to prevent a specific failure, write a test that proves the guard is
+  **load-bearing** — one that demonstrates the failure the guard prevents, not just that the
+  code works. `test_the_numeric_guard_is_load_bearing` asserts Dice alone would call
+  "RTX 5090" and "RTX 5080" duplicates, so deleting the guard produces an explanation rather
+  than silence. Phase 3b wants the same shape for the per-topic quotas: a test showing the
+  games section vanishes under 200 AI items when quotas are removed.
 
 ## Definition of done for any change
 `uv run digest run --dry-run` completes without network errors being fatal, tests pass,
