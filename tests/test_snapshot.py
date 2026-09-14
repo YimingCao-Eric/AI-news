@@ -43,6 +43,8 @@ rather than excluded from the dump.
 """
 
 import difflib
+import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -51,7 +53,20 @@ from scripts.snapshot_pipeline import SNAPSHOT_PATH, SnapshotError, generate, sn
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_pipeline_matches_the_committed_snapshot():
+@pytest.fixture(scope="module")
+def dump() -> str:
+    """One pipeline generation, shared by every test that only reads the result.
+
+    `generate()` re-parses 3 MB of fixtures -- 572 KB of arXiv XML and 717 KB of OpenAI RSS
+    among them -- and was being called six times across this module, making the snapshot
+    suite 6.8s of a 12s run. R3 runs this file constantly, so the cost compounds. Tests that
+    need a *second* generation (determinism) or a *different* one (a broken harness) still
+    call it themselves; sharing would defeat their subject.
+    """
+    return generate()
+
+
+def test_pipeline_matches_the_committed_snapshot(dump):
     """The contract. A readable diff, or nothing."""
     assert SNAPSHOT_PATH.exists(), (
         f"{SNAPSHOT_PATH} is missing. Generate it with "
@@ -59,7 +74,7 @@ def test_pipeline_matches_the_committed_snapshot():
     )
 
     expected = SNAPSHOT_PATH.read_text(encoding="utf-8")
-    actual = generate()
+    actual = dump
 
     if actual != expected:
         diff = "\n".join(
@@ -81,35 +96,59 @@ def test_pipeline_matches_the_committed_snapshot():
         )
 
 
-def test_generation_is_deterministic():
-    """Two generations in one process must be byte-identical.
+def test_generation_is_deterministic(dump):
+    """Two independent generations in one process must be byte-identical.
 
-    Cheap, and it catches the class of bug that produced this file: a clock or an unordered
-    iteration leaking into output that is supposed to be reproducible.
+    Catches the class of bug that produced this file: a clock or an unordered iteration
+    leaking into output that is supposed to be reproducible. `dump` is a separate, earlier
+    generation, so this is still two real runs -- one call rather than two, which halves the
+    most expensive test in the suite.
     """
-    assert generate() == generate()
+    assert generate() == dump
 
 
-def test_the_clock_is_pinned_to_the_fixture_set():
-    """Not hardcoded.
+def test_the_clock_follows_the_manifest_not_a_constant(tmp_path, monkeypatch):
+    """Load-bearing: replace `snapshot_now`'s body with a constant and this must fail.
 
-    `snapshot_now` reads `captured_at` from the fixture manifest, so re-recording moves the
-    pinned clock with the fixtures. A constant would drift out from under the `ai_blogs` age
-    cutoff and yield a snapshot of nothing, produced by a test that still passes.
+    The previous version asserted only that the manifest existed and that `snapshot_now()`
+    returned an aware datetime -- both of which a hardcoded
+    `return datetime(2026, 9, 14, tzinfo=UTC)` satisfies. It therefore certified the exact
+    design R0 rejected, which is worse than no test: someone simplifying the indirection away
+    would have got a green suite.
+
+    What the indirection is for: `ai_blogs` filters against `now - MAX_ENTRY_AGE_DAYS`, so a
+    constant frozen at one date pushes every entry outside the cutoff the moment fixtures are
+    re-recorded -- yielding a snapshot of nothing, produced by a test that still passes.
+    Reading `captured_at` means re-recording moves the clock as a side effect.
     """
-    manifest = REPO_ROOT / "tests" / "fixtures" / "manifest.json"
-    assert manifest.exists(), "record_fixtures.py writes this; --manifest-only stamps it"
-    assert snapshot_now().tzinfo is not None
+    from scripts import snapshot_pipeline
+
+    moved = tmp_path / "manifest.json"
+    moved.write_text(
+        json.dumps({"captured_at": "2031-07-04T12:34:56+00:00", "sources": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(snapshot_pipeline, "MANIFEST_PATH", moved)
+
+    assert snapshot_now() == datetime(2031, 7, 4, 12, 34, 56, tzinfo=UTC)
 
 
-def test_the_snapshot_exercises_the_age_cutoff():
+def test_a_missing_manifest_fails_loudly(tmp_path, monkeypatch):
+    """Without it there is no pinned clock, so a silent fallback would be a live one."""
+    from scripts import snapshot_pipeline
+
+    monkeypatch.setattr(snapshot_pipeline, "MANIFEST_PATH", tmp_path / "absent.json")
+    with pytest.raises(SnapshotError, match="is missing"):
+        snapshot_now()
+
+
+def test_the_snapshot_exercises_the_age_cutoff(dump):
     """Load-bearing: the snapshot must keep testing the filter, not just pass.
 
     `generate()` raises if `ai_blogs` keeps none of its entries or all of them -- either
     would mean the time window has stopped being exercised, and the bug that motivated all
     of this (fixtures aging past the cutoff, silently) could return unnoticed.
     """
-    dump = generate()
     header = next(line for line in dump.splitlines() if line.startswith("# rows="))
     kept = int(header.split("ai_blogs=")[1].split()[0])
     assert kept > 0
@@ -117,9 +156,8 @@ def test_the_snapshot_exercises_the_age_cutoff():
     assert "gh_trending=" in header
 
 
-def test_every_source_contributes_rows():
+def test_every_source_contributes_rows(dump):
     """A source dropping to zero is the silent rot the health footer cannot catch."""
-    dump = generate()
     header = next(line for line in dump.splitlines() if line.startswith("# rows="))
     for name in ("hn", "gh_trending", "hf_papers", "ai_blogs", "arxiv_cs_ai"):
         assert f"{name}=0 " not in header + " "

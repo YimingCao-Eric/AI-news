@@ -51,7 +51,7 @@ import pytest
 from digest.adapters.hn import LOOKBACK_HOURS, HNAdapter, build_request
 from digest.cli import main
 from digest.config import Config, Source, load_config
-from digest.fetch import ADAPTERS, fetch_all
+from digest.fetch import ADAPTERS, DEFAULT_USER_AGENT, fetch_all, user_agent
 from digest.models import Item
 from tests.conftest import NetworkAccessInTestError
 
@@ -397,3 +397,43 @@ def test_the_network_guard_still_allows_loopback():
 
 async def _trivial_coroutine() -> int:
     return 42
+
+
+def test_a_real_user_agent_is_sent_on_every_request(monkeypatch):
+    """CLAUDE.md hard constraint, previously invisible in 178 tests.
+
+    `MockTransport` does not care what headers arrive, so dropping `headers=` from
+    `fetch_all`'s client construction broke nothing in the suite. The first symptom would be
+    `gh_trending` returning 403 at 07:00 -- the exact failure its own error message tells you
+    to check the User-Agent for -- and Reddit, next in PLAN section 2 Tier 2, throttles
+    default agents the same way.
+    """
+    captured: list[httpx.Request] = []
+    real_client = httpx.AsyncClient
+
+    def client_factory(**kwargs) -> httpx.AsyncClient:
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.append(request)
+            return httpx.Response(200, json=STORIES)
+
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_client(**kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client_factory)
+    asyncio.run(fetch_all(_config_with_enabled("hn")))
+
+    assert captured, "no request was made"
+    agent = captured[0].headers.get("user-agent", "")
+    assert agent == user_agent()
+    assert agent
+    assert "python-httpx" not in agent.lower(), "httpx's default UA is what gets throttled"
+    assert "AI-news" in agent
+
+
+def test_the_user_agent_is_overridable_from_the_environment(monkeypatch):
+    """`.env.example` documents DIGEST_USER_AGENT; nothing asserted it was read."""
+    monkeypatch.setenv("DIGEST_USER_AGENT", "custom-agent/9.9 (+contact)")
+    assert user_agent() == "custom-agent/9.9 (+contact)"
+
+    monkeypatch.delenv("DIGEST_USER_AGENT", raising=False)
+    assert user_agent() == DEFAULT_USER_AGENT

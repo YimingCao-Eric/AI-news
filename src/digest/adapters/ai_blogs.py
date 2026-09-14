@@ -13,6 +13,7 @@ outcome reaches the run summary through `drain_notes`.
 
 import asyncio
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -57,18 +58,8 @@ MAX_ENTRY_AGE_DAYS = 30
 _WHITESPACE = re.compile(r"\s+")
 
 
-def _now() -> datetime:
-    """The wall clock, behind one indirection so an offline harness can pin it.
-
-    MAX_ENTRY_AGE_DAYS is measured against this, so without a seam the adapter produces a
-    different row set from the *same* recorded fixtures as the fixtures age -- 112 items
-    today, zero thirty days from now. scripts/snapshot_pipeline.py patches this to the
-    fixture capture instant, which is what makes the pipeline snapshot reproducible.
-
-    NOTE FOR R1 (vocabulary pass): this is a module-level patch point, while phase 2's
-    store takes the same concern as a parameter (`upsert_items(now=...)`). Two idioms for
-    one thing. Both work; pick one deliberately rather than by accretion.
-    """
+def utc_now() -> datetime:
+    """Default clock. Replaceable per instance -- see `AIBlogsAdapter.__init__`."""
     return datetime.now(tz=UTC)
 
 
@@ -92,7 +83,21 @@ class FeedOutcome:
 class AIBlogsAdapter(Adapter):
     name = "ai_blogs"
 
-    def __init__(self) -> None:
+    def __init__(self, clock: Callable[[], datetime] = utc_now) -> None:
+        """`clock` is injected rather than monkeypatched, and is a *callable*, not a value.
+
+        MAX_ENTRY_AGE_DAYS and the staleness thresholds are both measured against it, so an
+        offline harness reading fixed fixtures must be able to pin it -- otherwise the same
+        recorded feeds yield 112 items today and zero thirty days from now.
+
+        Note the deliberate naming split, which is the point of the vocabulary rule it
+        follows: a long-lived object takes a `clock: Callable[[], datetime]`, because it is
+        constructed once and may fetch many times; a single function call takes a
+        `now: datetime`, because it happens at one instant. `store.upsert_items(now=...)` is
+        the latter. Same concern, two lifetimes, two names -- so the difference is visible
+        rather than discovered by type error.
+        """
+        self._clock = clock
         self._notes: list[str] = []
 
     def drain_notes(self) -> list[str]:
@@ -102,7 +107,7 @@ class AIBlogsAdapter(Adapter):
     async def fetch(self, client: httpx.AsyncClient, source: Source) -> list[Item]:
         self._notes = []
         feeds = source.endpoints
-        now = _now()
+        now = self._clock()
 
         results = await asyncio.gather(
             *(self._fetch_feed(client, feed, source.name, now) for feed in feeds),

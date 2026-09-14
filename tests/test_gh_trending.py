@@ -139,16 +139,31 @@ def test_an_http_error_propagates(source):
 
 
 def test_every_selector_is_a_module_constant():
-    """A layout change should be a one-line fix, not an archaeology session."""
+    """A layout change should be a one-line fix, not an archaeology session.
+
+    Scans the whole module minus the declared selector block, rather than two named private
+    functions. The earlier version called `inspect.getsource` on `parse_trending` and
+    `_item_from_row` by name, which made a behaviour-preserving rename or inline fail with
+    `AttributeError` -- penalising exactly the refactoring this review exists to enable --
+    while a selector inlined into some *third* helper would have passed unnoticed.
+    """
     import inspect
 
     from digest.adapters import gh_trending
 
-    body = inspect.getsource(gh_trending.parse_trending) + inspect.getsource(
-        gh_trending._item_from_row
-    )
-    assert "Box-row" not in body
-    assert "itemprop" not in body
+    lines = inspect.getsource(gh_trending).splitlines()
+    starts = [i for i, line in enumerate(lines) if line.startswith("# --- Selectors")]
+    assert len(starts) == 1, "the selector block marker in gh_trending.py has moved"
+
+    ends = [i for i, line in enumerate(lines) if i > starts[0] and line.startswith("# ----")]
+    assert ends, "the selector block is not closed by a `# ----` line"
+
+    outside = "\n".join(lines[: starts[0]] + lines[ends[0] + 1 :])
+    for literal in ("Box-row", "itemprop", "d-inline-block"):
+        assert literal not in outside, (
+            f"selector literal {literal!r} appears outside the declared block in "
+            f"gh_trending.py -- a layout change would then need finding, not just editing"
+        )
 
 
 def test_raw_contains_no_clock():

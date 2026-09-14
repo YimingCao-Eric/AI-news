@@ -40,9 +40,9 @@ import httpx
 import pytest
 
 from digest import store
-from digest.adapters import ai_blogs
+from digest.adapters.ai_blogs import AIBlogsAdapter
 from digest.config import Config, load_config
-from digest.fetch import fetch_all
+from digest.fetch import ADAPTERS, fetch_all
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = REPO_ROOT / "tests" / "fixtures"
@@ -139,7 +139,11 @@ def offline(config: Config, now: datetime) -> Iterator[None]:
         patch.setattr(
             httpx, "AsyncClient", lambda **kw: real_client(**{**kw, "transport": transport})
         )
-        patch.setattr(ai_blogs, "_now", lambda: now)
+        # The clock is injected into the adapter, not monkeypatched onto its module: swap
+        # the registry entry for an instance built with a pinned clock. `ai_blogs` measures
+        # both MAX_ENTRY_AGE_DAYS and staleness against it, so the same fixtures would yield
+        # a different row set as they age without this.
+        patch.setitem(ADAPTERS, AIBlogsAdapter.name, AIBlogsAdapter(clock=lambda: now))
         yield
 
 

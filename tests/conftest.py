@@ -21,6 +21,7 @@ import asyncio
 import json
 import socket
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,22 @@ def configured_source(name: str) -> Source:
 
 def configured_interests() -> InterestProfile:
     return load_config(REPO_ROOT).interests
+
+
+def fixture_captured_at() -> datetime:
+    """When the recorded fixtures were captured. The clock any fixture-reading test must use.
+
+    Time-windowed adapters measure against `now`, so a test that reads frozen fixtures with
+    a live clock has a shelf life. Before this existed, four `ai_blogs` tests were dated to
+    fail on 2026-09-21 and 2026-10-01 with no code change -- and their failure mode was
+    worse than a red suite: it trains you to re-record fixtures, which is also the correct
+    response to a feed genuinely dying, so the two stop being distinguishable.
+
+    R0 already solved this for the pipeline snapshot. This is the same solution, wired into
+    the unit tests that needed it most.
+    """
+    manifest = json.loads((FIXTURES / "manifest.json").read_text(encoding="utf-8"))
+    return datetime.fromisoformat(manifest["captured_at"]).astimezone(UTC)
 
 
 def run_adapter(

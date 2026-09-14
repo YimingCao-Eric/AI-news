@@ -62,10 +62,19 @@ def test_revisions_are_excluded(source):
 
 
 def test_the_announce_filter_is_load_bearing():
-    """Proof it earns its place: without it, a third of arXiv would be revisions."""
+    """Proof it earns its place: without it, revisions would enter the digest as new work.
+
+    Asserts revisions *exist* rather than that they exceed a share. The share was measured at
+    38% on 2026-09-14 (cs.AI: cross 98, replace-cross 72, new 69, replace 31), and an earlier
+    version of this test asserted `> 0.25` -- a property of that particular day rather than of
+    the code. A quiet Sunday re-record could drop it to 20% and fail a test with nothing
+    wrong, which trains you to re-record until green. The fact that matters is that arXiv
+    announces revisions at all, which is true of every day it publishes.
+    """
     entries = parsed(CS_AI)
     revisions = [e for e in entries if e.arxiv_announce_type not in KEPT_ANNOUNCE_TYPES]
-    assert len(revisions) / len(entries) > 0.25
+    assert revisions, "fixture contains no revisions -- the filter has nothing to do"
+    assert len(revisions) < len(entries), "everything is a revision; re-record"
 
 
 def test_new_and_cross_are_both_kept(source):
