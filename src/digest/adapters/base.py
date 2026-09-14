@@ -43,5 +43,25 @@ class Adapter(ABC):
 
         The client is shared across sources and already carries the User-Agent and timeout;
         adapters must not construct their own.
+
+        On zero items, see CLAUDE.md: **raise when zero means "we no longer understand this
+        endpoint", return `[]` when zero is a state the source can genuinely be in.** An
+        empty list is indistinguishable from a quiet day, so returning one for a broken
+        endpoint is the silent rot the health footer cannot catch.
         """
         raise NotImplementedError
+
+    def drain_notes(self) -> list[str]:
+        """Diagnostics from the last fetch, for the run summary. Returns and clears.
+
+        This exists for the state between success and failure that neither `Item` nor
+        `SourceHealth` can express: a bundle source where one feed of six timed out, or
+        answered 200 with well-formed XML whose newest entry is four months old. Those must
+        be *reported*, not silently absent -- but adapters may not log or print, so they
+        hand the strings back and `fetch.py` owns the output.
+
+        Safe as instance state because each adapter instance serves exactly one source, and
+        `fetch_all` runs one coroutine per source. Draining keeps one run's notes out of the
+        next. Adapters with nothing to say inherit this and return nothing.
+        """
+        return []

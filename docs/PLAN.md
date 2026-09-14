@@ -229,6 +229,40 @@ re-rank of the top 60, not a replacement. When they disagree strongly, that's yo
 cosine similarity as one more feature. Worth it mainly for catching relevant items whose titles share
 no keywords with your profile. Do it as the course exercise, keep it only if the A/B is convincing.
 
+### 5.1 Cross-source duplicates — the phase 3b task
+
+Phase 3a confirmed on real data that `hf_papers` and `arxiv_cs_ai` carry the same paper on
+the same morning, under different URLs:
+
+```
+[hf_papers]   https://huggingface.co/papers/2609.13141
+[arxiv_cs_ai] https://arxiv.org/abs/2609.13141
+```
+
+**Prefer an extracted identifier over fuzzy matching wherever a source exposes one.** Those
+two URLs both end in the arXiv ID. They are not similar documents, they are *the same
+document*, and a shared extractable ID is the strongest duplicate signal available anywhere
+in this system — deterministic, immune to a rewritten title, and with none of Dice's
+false-positive surface. So layer it:
+
+1. **ID identity pass, first.** Extract an arXiv ID from either URL shape; equal IDs set
+   `dupe_of` deterministically.
+2. **Dice + numeric guard, as fallback**, for pairs with no shared identifier — the same
+   story on two news sites, which is the case it was designed for.
+
+**Do not fold the ID into `canonical_url`**, tempting as it is. Collapsing at `url_hash` is a
+silent drop through `INSERT OR IGNORE`, which is exactly the direction phase 2 refused. Keep
+both rows, record the relationship, stay visible.
+
+**Precedence must be explicit, and needs a load-bearing test.** Today the winner is whichever
+source appears first in `sources.yaml`, which is incidental ordering in a file that looks like
+formatting. Write a test that reorders `sources.yaml` and asserts the winner does not move —
+even once the ID rule makes the question mostly moot, because "mostly" is where this class of
+bug lives. On merit `hf_papers` should win: it carries `upvotes`, `submittedBy`, `numComments`
+and `githubRepo`, i.e. it already survived a human filter, while arXiv cs.AI is ~240 unfiltered
+entries a day. The exception is a zero-upvote HF entry, which carries no more signal than the
+arXiv row — so make the tiebreak upvotes-aware rather than a flat source precedence.
+
 **Feedback loop.** The `feedback` column plus a two-second way to set it (a `[+]`/`[−]` link per item
 in the HTML that hits a tiny local endpoint, or just `digest feedback 41 -1` on the CLI). Thirty
 labelled items is enough to tune keyword weights by hand; two hundred is enough to be worth fitting
@@ -330,6 +364,30 @@ Light, but not zero — this thing runs unattended, which is exactly where silen
   your "keeps" were in the top 8. That number is the only quality metric that matters; write it down
   each week so you can tell whether changes help.
 - **Snapshot the renderer**: one golden Markdown file so template edits don't silently break layout.
+
+### 8.1 Review questions for any change
+
+This project's bugs have not been logic errors. Every one so far came from an interaction
+between two individually-correct decisions, and each surfaced from a check rather than a
+claim. Ask these before declaring a change done:
+
+1. **For every filter, what downstream measurement reads the filtered data, and does it need
+   the unfiltered version?** A filter changes what every later measurement can see. Phase 3a:
+   a 30-day ingest cutoff and a staleness warning were both correct, and composing them would
+   have blinded the warning precisely on the feeds it existed to catch — a 112-day-stale feed
+   reports "0 entries", which reads as a quiet week. Fixed by measuring `newest` over every
+   entry before the cutoff.
+   **This applies immediately in phase 3b**: `max_age_hours` is the next filter, and the
+   UNCLASSIFIED count is the measurement behind it.
+2. **Does any behaviour rest on an incidental property that looks like formatting?** Phase 3a:
+   the direction of `dupe_of` between `hf_papers` and `arxiv_cs_ai` currently depends on the
+   order of entries in `sources.yaml` — a file nobody thinks of as semantically load-bearing,
+   which someone will alphabetise one day. See §5.1.
+3. **Do two correct rules meet anywhere?** Phase 1: "no source may abort the run" had quietly
+   generalised to "no signal may abort the run", so the test-suite network guard was caught
+   and filed as a dead feed.
+4. **Does the guard have a load-bearing test** — one that demonstrates the failure it
+   prevents, so deleting it produces an explanation rather than silence?
 
 ---
 

@@ -87,7 +87,7 @@ def _run_fetch(config: Config, args: argparse.Namespace) -> int:
         print()
         # Read back rather than reusing the in-memory records: the persisted counter is the
         # one that knows a source has been failing for three days.
-        print(_health_summary(result.items, store.get_source_health(conn)))
+        print(_health_summary(result.items, store.get_source_health(conn), result.notes))
     finally:
         conn.close()
     return 0
@@ -158,8 +158,17 @@ def _log_source_line(
     )
 
 
-def _health_summary(items: list[Item], health: list[SourceHealth]) -> str:
-    """The source-health footer from PLAN.md section 2.1."""
+def _health_summary(
+    items: list[Item],
+    health: list[SourceHealth],
+    notes: dict[str, list[str]] | None = None,
+) -> str:
+    """The source-health footer from PLAN.md section 2.1.
+
+    Per-feed notes are indented under their source. For a bundle like `ai_blogs` the
+    source-level "ok" is not the whole truth -- five feeds can answer while the sixth is
+    four months stale, and that line is the only place it shows.
+    """
     counts: dict[str, int] = {}
     for item in items:
         counts[item.source] = counts.get(item.source, 0) + 1
@@ -177,6 +186,8 @@ def _health_summary(items: list[Item], health: list[SourceHealth]) -> str:
             f"  {record.name:<12} {status:<12} items={counts.get(record.name, 0):<4} "
             f"last_success={seen}"
         )
+        for note in (notes or {}).get(record.name, []):
+            lines.append(f"      - {note}")
     return "\n".join(lines)
 
 

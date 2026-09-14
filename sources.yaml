@@ -34,30 +34,40 @@ sources:
     url: "https://github.com/trending?since=daily&spoken_language_code=en"
     weight: 1.0
     fetch_limit: 25
-    enabled: false
+    enabled: true
 
   - name: hf_papers
     kind: json_api
     # The curated daily-papers feed -- far better signal than raw new-model listings.
     url: "https://huggingface.co/api/daily_papers"
     weight: 1.1
-    fetch_limit: 20
-    enabled: false
+    fetch_limit: 50
+    enabled: true
 
   - name: ai_blogs
     kind: rss
     # A bundle: six endpoints sharing one weight, one fetch budget and one health record.
     # Rule is official feed first, community mirror only where no official feed exists.
     #
-    # Deliberately not subscribed: anthropic_red (frontier safety research -- real work,
-    # but matches no topic in interests.yaml), cohere (enterprise sales posts), xai
-    # (announcement volume, artifact-light), google_ai (overlaps DeepMind).
+    # FRESHNESS MEASURED 2026-09-14 (phase 3a gate, scripts/record_fixtures.py probe).
+    # The finding that matters: the Olshansk mirror is not uniformly unreliable, it is
+    # unreliable PER FEED -- both official feeds were fresh, and three of four mirror feeds
+    # were months stale while returning HTTP 200 with well-formed XML. One healthy feed from
+    # that mirror tells you nothing about the others, which is why adapters/ai_blogs.py
+    # carries a per-feed staleness threshold and reports STALE in the run summary. Without
+    # it these simply go quiet and nothing says so.
     #
-    # ⚠️ PHASE 3A, BEFORE WRITING THE ADAPTER: check the newest pubDate in all six. The
-    # Anthropic mirrors were last seen topping out at 2026-07-14, which may have been a
-    # stale cache but is unconfirmed. If they really are months behind, switch to
-    # taobojlen/anthropic-rss-feed or an RSSHub route -- do not ship a feed that quietly
-    # delivers nothing.
+    # DROPPED 2026-09-14, all three months stale, all replaced below. Every alternative
+    # checked returned 404 (taobojlen/anthropic-rss-feed, official Anthropic/Meta/Mistral
+    # RSS), so the replacements come from the same mirror -- hence the staleness warning
+    # rather than blind trust. Re-add any of these if it revives:
+    #   anthropic_engineering  newest 2026-05-25 (112d)  feed_anthropic_engineering.xml
+    #   meta_ai                newest 2026-07-27  (49d)  feed_meta_ai.xml
+    #   mistral                newest 2026-05-22 (115d)  feed_mistral.xml
+    #
+    # Also deliberately not subscribed: anthropic_red (frontier safety research -- real
+    # work, but matches no topic in interests.yaml), cohere (enterprise sales posts), xai
+    # (stale, 116d), google_ai (overlaps DeepMind), windsurf_changelog (stale, 109d).
     feeds:
       - name: openai_news
         url: "https://openai.com/news/rss.xml"          # official
@@ -65,20 +75,43 @@ sources:
         url: "https://deepmind.google/blog/rss.xml"     # official
       - name: anthropic_news
         url: "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_anthropic_news.xml"
-      - name: anthropic_engineering
-        url: "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_anthropic_engineering.xml"
-      - name: meta_ai
-        url: "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_meta_ai.xml"
-      - name: mistral
-        url: "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_mistral.xml"
+      # Replacements for the three dropped feeds. Chosen to weight toward ai-coding-agents,
+      # the highest-weighted topic in interests.yaml (1.2).
+      - name: claude
+        url: "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_claude.xml"
+      - name: anthropic_research
+        url: "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_anthropic_research.xml"
+      - name: cursor
+        url: "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_cursor.xml"
     weight: 1.2
     fetch_limit: null
-    enabled: false
+    enabled: true
 
   - name: arxiv_cs_ai
     kind: rss
-    # High volume (~50/day). Fetched in full and quota'd at selection time, not at ingest.
-    url: "https://rss.arxiv.org/rss/cs.AI"
+    # A bundle, despite the name: one adapter serves several categories.
+    #
+    # VOLUME MEASURED 2026-09-14: cs.AI 270 entries, cs.CL 115, cs.MA 16. Not the ~50/day
+    # the plan assumed. Of cs.AI's 270, only 167 are new work -- the rest are `replace` /
+    # `replace-cross`, i.e. v2 revisions of papers that may be months old. The adapter keeps
+    # `new` and `cross` only; a revision entering the digest as if fresh is exactly the
+    # quiet wrongness that makes you stop trusting it.
+    #
+    # fetch_limit covers everything eligible rather than capping at 50. Fetch generously,
+    # select narrowly: an item never stored can never be re-scored when the ranker changes
+    # (PLAN.md section 4), and RSS order is announcement order, so a cap would discard ~70%
+    # of arXiv essentially at random. Topic quotas in interests.yaml do the narrowing --
+    # that is what they are for. Cost is a few hundred KB a day; phase 4's LLM spend is
+    # unaffected, since only the rule-ranker's top ~60 ever reach a model.
+    # The adapter interleaves categories round-robin so that if this cap ever does bind, it
+    # binds fairly rather than letting cs.AI's 270 crush cs.MA's 16.
+    feeds:
+      - name: cs.AI
+        url: "https://rss.arxiv.org/rss/cs.AI"
+      - name: cs.CL
+        url: "https://rss.arxiv.org/rss/cs.CL"
+      - name: cs.MA
+        url: "https://rss.arxiv.org/rss/cs.MA"
     weight: 0.7
-    fetch_limit: 50
-    enabled: false
+    fetch_limit: 250
+    enabled: true

@@ -74,8 +74,9 @@ def test_shipped_config_loads():
         "ai_blogs",
         "arxiv_cs_ai",
     ]
-    assert [s.name for s in config.sources.enabled] == ["hn"]
-    assert config.sources.by_name("arxiv_cs_ai").fetch_limit == 50
+    # All five went live in phase 3a.
+    assert [s.name for s in config.sources.enabled] == [s.name for s in config.sources.sources]
+    assert config.sources.by_name("arxiv_cs_ai").fetch_limit == 250
     assert config.sources.by_name("ai_blogs").fetch_limit is None
     assert config.interests.hard_rules.min_hn_points == 100
     assert len(config.interests.topics) == 13
@@ -83,13 +84,16 @@ def test_shipped_config_loads():
 
 def test_ai_blogs_is_a_six_feed_bundle():
     bundle = load_config(REPO_ROOT).sources.by_name("ai_blogs")
+    # anthropic_engineering / meta_ai / mistral were dropped in phase 3a: measured 112d,
+    # 49d and 115d stale respectively, all returning 200 with well-formed XML. sources.yaml
+    # records them in a comment so a revived feed can be re-added.
     assert [f.name for f in bundle.feeds] == [
         "openai_news",
         "deepmind",
         "anthropic_news",
-        "anthropic_engineering",
-        "meta_ai",
-        "mistral",
+        "claude",
+        "anthropic_research",
+        "cursor",
     ]
     assert bundle.url is None
     assert len(bundle.endpoints) == 6

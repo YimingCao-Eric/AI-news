@@ -325,6 +325,10 @@ def test_no_enabled_sources_is_not_a_crash(monkeypatch):
 
 
 def test_cli_fetch_prints_items_and_health_footer(monkeypatch, capsys, tmp_path):
+    # hn only. Phase 3a enabled all five sources, and without this the mocked HN payload
+    # would be served to four adapters that correctly reject it -- the test would still
+    # pass, but for the wrong reason.
+    monkeypatch.setattr("digest.cli.load_config", lambda _: _config_with_enabled("hn"))
     real_client = httpx.AsyncClient
     monkeypatch.setattr(
         httpx,

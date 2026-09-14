@@ -15,7 +15,11 @@ from datetime import UTC, datetime
 
 import httpx
 
+from digest.adapters.ai_blogs import AIBlogsAdapter
+from digest.adapters.arxiv import ArxivAdapter
 from digest.adapters.base import Adapter
+from digest.adapters.gh_trending import GhTrendingAdapter
+from digest.adapters.hf_papers import HFPapersAdapter
 from digest.adapters.hn import HNAdapter
 from digest.config import Config, Source
 from digest.models import Item, SourceHealth
@@ -37,20 +41,33 @@ class FetchResult:
     health: list[SourceHealth] = field(default_factory=list)
     #: Wall-clock seconds per source name. Measured here because only the fetch loop sees it.
     durations: dict[str, float] = field(default_factory=dict)
+    #: Per-source diagnostics from `Adapter.drain_notes` -- per-feed counts, failures and
+    #: staleness for bundle sources. The state between "worked" and "failed", which
+    #: neither Item nor SourceHealth can express.
+    notes: dict[str, list[str]] = field(default_factory=dict)
 
 
-#: Adapters by the source name in sources.yaml they serve. Phase 3 adds the other four.
-ADAPTERS: dict[str, Adapter] = {adapter.name: adapter for adapter in (HNAdapter(),)}
+#: Adapters by the source name in sources.yaml they serve. Keys must match `name` there;
+#: an enabled source with no adapter is a recorded failure, not a silent skip.
+ADAPTERS: dict[str, Adapter] = {
+    adapter.name: adapter
+    for adapter in (
+        HNAdapter(),
+        GhTrendingAdapter(),
+        HFPapersAdapter(),
+        AIBlogsAdapter(),
+        ArxivAdapter(),
+    )
+}
 
 DEFAULT_USER_AGENT = "AI-news-digest/0.1 (+https://github.com/YimingCao-Eric/AI-news)"
 
-#: Budget for one whole source, not one request.
+#: Backstop budget for one whole source, not one request.
 #:
-#: NOTE FOR PHASE 3A (ai_blogs): this wraps the entire source coroutine, which is right for a
-#: single-endpoint source but wrong once six feeds sit behind one `Source`. There, one slow
-#: feed would burn the shared budget and cost you the other five. That adapter needs its own
-#: per-feed timeout and partial-success handling internally -- returning the feeds that did
-#: answer -- rather than relying on this outer wrapper.
+#: Bundle sources do NOT rely on this: `ai_blogs` (6 feeds, 8s each) and `arxiv_cs_ai`
+#: (3 categories, 10s each) enforce their own per-feed timeouts and return partial results,
+#: because one slow feed spending the shared budget would cost you every other feed behind
+#: the same source. This remains the outer guard for a hung adapter.
 SOURCE_TIMEOUT_SECONDS = 20.0
 
 
@@ -61,10 +78,11 @@ def user_agent() -> str:
 
 async def _fetch_one(
     client: httpx.AsyncClient, source: Source
-) -> tuple[list[Item], SourceHealth, float]:
+) -> tuple[list[Item], SourceHealth, float, list[str]]:
     """Fetch one source. Never raises: every failure becomes a health record."""
     started = time.monotonic()
     items: list[Item] = []
+    notes: list[str] = []
     error: str | None = None
 
     try:
@@ -83,6 +101,12 @@ async def _fetch_one(
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
         log.warning("source %s failed: %s", source.name, error, exc_info=True)
+    finally:
+        # Drained even on failure: a bundle source that raised because every feed died still
+        # knows *which* feeds died, and that is the useful half of the report.
+        reporting_adapter = ADAPTERS.get(source.name)
+        if reporting_adapter is not None:
+            notes = reporting_adapter.drain_notes()
 
     duration = time.monotonic() - started
     if error is None:
@@ -95,7 +119,7 @@ async def _fetch_one(
     # CLAUDE.md's one-line-per-source run log is emitted by the caller, not here: the "new
     # items" column only exists after the store has written, and fetch.py is not allowed to
     # touch the store. `durations` on FetchResult is how the timing reaches it.
-    return items, health, duration
+    return items, health, duration, notes
 
 
 async def fetch_all(config: Config) -> FetchResult:
@@ -122,6 +146,7 @@ async def fetch_all(config: Config) -> FetchResult:
     items: list[Item] = []
     health: list[SourceHealth] = []
     durations: dict[str, float] = {}
+    notes: dict[str, list[str]] = {}
     for source, result in zip(sources, results, strict=True):
         if isinstance(result, BaseException):
             if not isinstance(result, Exception):
@@ -136,9 +161,11 @@ async def fetch_all(config: Config) -> FetchResult:
             health.append(SourceHealth(name=source.name, consecutive_failures=1))
             durations[source.name] = 0.0
             continue
-        source_items, source_health, duration = result
+        source_items, source_health, duration, source_notes = result
         items.extend(source_items)
         health.append(source_health)
         durations[source.name] = duration
+        if source_notes:
+            notes[source.name] = source_notes
 
-    return FetchResult(items=items, health=health, durations=durations)
+    return FetchResult(items=items, health=health, durations=durations, notes=notes)
