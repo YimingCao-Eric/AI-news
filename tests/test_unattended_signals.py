@@ -20,7 +20,7 @@ from digest.cli import (
     _health_summary,
     main,
 )
-from digest.fetch import ADAPTERS
+from digest.fetch import fetch_all
 from digest.models import SourceHealth
 from tests.conftest import REPO_ROOT, fixture_json
 from tests.test_hn import _config_with_enabled, _Exploding
@@ -28,8 +28,11 @@ from tests.test_hn import _config_with_enabled, _Exploding
 STORIES = fixture_json("hn_search_by_date.json")
 
 
-def _serve(monkeypatch, payload=None, enabled=("hn",)):
-    """Point the CLI at a mocked transport and a chosen set of enabled sources."""
+def _serve(monkeypatch, payload=None, enabled=("hn",), adapters=None):
+    """Point the CLI at a mocked transport, chosen sources, and injected adapters.
+
+    `adapters` merges: naming one source leaves the others constructing normally.
+    """
     real_client = httpx.AsyncClient
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -40,7 +43,12 @@ def _serve(monkeypatch, payload=None, enabled=("hn",)):
         "AsyncClient",
         lambda **kw: real_client(**{**kw, "transport": httpx.MockTransport(handler)}),
     )
-    monkeypatch.setattr("digest.cli.load_config", lambda _: _config_with_enabled(*enabled))
+    monkeypatch.setattr("digest.cli.load_config", lambda *a, **k: _config_with_enabled(*enabled))
+    if adapters is not None:
+        real = fetch_all
+        monkeypatch.setattr(
+            "digest.cli.fetch_all", lambda config, **kw: real(config, adapters=adapters)
+        )
 
 
 # ------------------------------------------------------------------------------ exit codes
@@ -48,9 +56,11 @@ def _serve(monkeypatch, payload=None, enabled=("hn",)):
 
 def test_every_source_failing_exits_non_zero(monkeypatch, tmp_path, capsys):
     """The headline. A scheduler decides "did it work?" from this alone."""
-    monkeypatch.setitem(ADAPTERS, "gh_trending", _Exploding())
-    monkeypatch.setitem(ADAPTERS, "hn", _Exploding())
-    _serve(monkeypatch, enabled=("hn", "gh_trending"))
+    _serve(
+        monkeypatch,
+        enabled=("hn", "gh_trending"),
+        adapters={"hn": _Exploding(), "gh_trending": _Exploding()},
+    )
 
     code = main(["fetch", "--config-dir", str(REPO_ROOT), "--db", str(tmp_path / "t.db")])
     assert code == EXIT_ALL_SOURCES_FAILED
@@ -64,8 +74,7 @@ def test_one_source_failing_still_exits_zero(monkeypatch, tmp_path):
     reasoning that gave ai_blogs per-feed staleness thresholds rather than one global number.
     It also must stay 0 because CLAUDE.md forbids one dead source failing the job.
     """
-    monkeypatch.setitem(ADAPTERS, "gh_trending", _Exploding())
-    _serve(monkeypatch, enabled=("hn", "gh_trending"))
+    _serve(monkeypatch, enabled=("hn", "gh_trending"), adapters={"gh_trending": _Exploding()})
 
     code = main(["fetch", "--config-dir", str(REPO_ROOT), "--db", str(tmp_path / "t.db")])
     assert code == EXIT_OK

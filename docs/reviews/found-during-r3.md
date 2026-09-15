@@ -78,9 +78,10 @@ formatting helpers.
 VN-3 was resolved as (a): one entry that cannot be mapped to an `Item` fails its whole feed,
 with the entry's URL named in the message. (b) -- skip the entry, count it, raise only above a
 threshold -- is more proportionate and was rejected for a structural reason, not a
-preference: only `arxiv` and `ai_blogs` have a `drain_notes` channel. `hn`, `hf_papers` and
-`gh_trending` inherit the default returning `[]`, so a skip would be counted visibly in two
-adapters and silently in three. A silent drop in the places nobody can see is the exact
+preference. **Corrected wording (Theme 5):** all five adapters *have* a channel -- they
+inherit `drain_notes` from the base. What `hn`, `hf_papers` and `gh_trending` lack is
+anything to put in it: no `_notes` list, and nothing today that appends to one. So a skip
+would be counted visibly in the two bundle adapters and silently in the other three. A silent drop in the places nobody can see is the exact
 failure class this review exists to remove.
 
 **Suggested trigger:** DUP-5 giving every adapter a shared notes channel (Theme 5), or the

@@ -43,7 +43,7 @@ from digest import store
 from digest.adapters.ai_blogs import AIBlogsAdapter
 from digest.config import Config, load_config
 from digest.errors import DigestControlError
-from digest.fetch import ADAPTERS, fetch_all
+from digest.fetch import KNOWN_KINDS, fetch_all
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = REPO_ROOT / "tests" / "fixtures"
@@ -137,11 +137,6 @@ def offline(config: Config, now: datetime) -> Iterator[None]:
         patch.setattr(
             httpx, "AsyncClient", lambda **kw: real_client(**{**kw, "transport": transport})
         )
-        # The clock is injected into the adapter, not monkeypatched onto its module: swap
-        # the registry entry for an instance built with a pinned clock. `ai_blogs` measures
-        # both MAX_ENTRY_AGE_DAYS and staleness against it, so the same fixtures would yield
-        # a different row set as they age without this.
-        patch.setitem(ADAPTERS, AIBlogsAdapter.name, AIBlogsAdapter(clock=lambda: now))
         yield
 
 
@@ -169,13 +164,19 @@ def _row_line(row: sqlite3.Row) -> str:
 
 def generate(config: Config | None = None) -> str:
     """Run the pipeline over the fixtures and return the dump."""
-    config = config or load_config(REPO_ROOT)
+    config = config or load_config(REPO_ROOT, known_kinds=KNOWN_KINDS)
     now = snapshot_now()
 
     import asyncio
 
     with offline(config, now):
-        result = asyncio.run(fetch_all(config))
+        # The pinned clock reaches `ai_blogs` by injection through the public API. It used to
+        # be a `setitem` on the module-level registry; with one instance per source there is
+        # no registry entry to swap, and `adapters=` merges, so the other four sources still
+        # construct normally.
+        result = asyncio.run(
+            fetch_all(config, adapters={"ai_blogs": AIBlogsAdapter(clock=lambda: now)})
+        )
 
     _assert_time_window_is_exercised(result.items, config)
 

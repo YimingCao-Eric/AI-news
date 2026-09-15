@@ -22,7 +22,7 @@ _WHITESPACE = re.compile(r"\s+")
 
 
 class HFPapersAdapter(Adapter):
-    name = "hf_papers"
+    kind = "hf_papers"
 
     async def fetch(self, client: httpx.AsyncClient, source: Source) -> list[Item]:
         if source.url is None:  # pragma: no cover -- the config validator forbids it

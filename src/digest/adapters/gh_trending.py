@@ -46,7 +46,7 @@ class GitHubTrendingError(SourcePayloadError):
 
 
 class GhTrendingAdapter(Adapter):
-    name = "gh_trending"
+    kind = "gh_trending"
 
     async def fetch(self, client: httpx.AsyncClient, source: Source) -> list[Item]:
         if source.url is None:  # pragma: no cover -- the config validator forbids it

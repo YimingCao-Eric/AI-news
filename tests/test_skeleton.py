@@ -12,7 +12,9 @@ from pydantic import ValidationError
 
 from digest.cli import EXIT_USAGE_OR_CONFIG, build_parser, main
 from digest.config import ConfigError, Source, load_config
+from digest.fetch import KNOWN_KINDS
 from digest.models import Item, SourceHealth
+from tests.conftest import load_repo_config
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -66,7 +68,7 @@ def test_source_health_defaults():
 
 
 def test_shipped_config_loads():
-    config = load_config(REPO_ROOT)
+    config = load_repo_config()
     assert [s.name for s in config.sources.sources] == [
         "hn",
         "gh_trending",
@@ -83,7 +85,7 @@ def test_shipped_config_loads():
 
 
 def test_ai_blogs_is_a_six_feed_bundle():
-    bundle = load_config(REPO_ROOT).sources.by_name("ai_blogs")
+    bundle = load_repo_config().sources.by_name("ai_blogs")
     # anthropic_engineering / meta_ai / mistral were dropped in phase 3a: measured 112d,
     # 49d and 115d stale respectively, all returning 200 with well-formed XML. sources.yaml
     # records them in a comment so a revived feed can be re-added.
@@ -100,7 +102,7 @@ def test_ai_blogs_is_a_six_feed_bundle():
 
 
 def test_single_url_source_exposes_one_endpoint():
-    hn = load_config(REPO_ROOT).sources.by_name("hn")
+    hn = load_repo_config().sources.by_name("hn")
     assert [e.name for e in hn.endpoints] == ["hn"]
     assert hn.endpoints[0].url == hn.url
 
@@ -125,7 +127,7 @@ def test_source_endpoint_shape_is_validated(extra, match):
 
 def test_missing_config_dir_fails_loudly(tmp_path):
     with pytest.raises(ConfigError, match="not found"):
-        load_config(tmp_path)
+        load_config(tmp_path, known_kinds=KNOWN_KINDS)
 
 
 def test_unknown_key_fails_loudly(tmp_path):
@@ -141,7 +143,7 @@ def test_unknown_key_fails_loudly(tmp_path):
     )
     (tmp_path / "interests.yaml").write_text("profile: x\n", encoding="utf-8")
     with pytest.raises(ConfigError, match="quota"):
-        load_config(tmp_path)
+        load_config(tmp_path, known_kinds=KNOWN_KINDS)
 
 
 @pytest.mark.parametrize("command", ["fetch", "rank", "render", "run"])

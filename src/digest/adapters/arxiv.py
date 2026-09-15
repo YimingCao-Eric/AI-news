@@ -43,7 +43,7 @@ FEED_TIMEOUT_SECONDS = 10.0
 
 
 class ArxivAdapter(Adapter):
-    name = "arxiv_cs_ai"
+    kind = "arxiv"
 
     def __init__(self) -> None:
         self._notes: list[str] = []

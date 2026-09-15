@@ -82,7 +82,7 @@ class FeedOutcome:
 
 
 class AIBlogsAdapter(Adapter):
-    name = "ai_blogs"
+    kind = "ai_blogs"
 
     def __init__(self, clock: Callable[[], datetime] = utc_now) -> None:
         """`clock` is injected rather than monkeypatched, and is a *callable*, not a value.

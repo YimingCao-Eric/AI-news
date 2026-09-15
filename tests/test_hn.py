@@ -48,12 +48,13 @@ from urllib.parse import parse_qs
 import httpx
 import pytest
 
+from digest.adapters.base import Adapter
 from digest.adapters.hn import LOOKBACK_HOURS, HNAdapter, build_request
 from digest.cli import main
-from digest.config import Config, Source, load_config
-from digest.fetch import ADAPTERS, DEFAULT_USER_AGENT, fetch_all, user_agent
+from digest.config import Config, Source
+from digest.fetch import DEFAULT_USER_AGENT, fetch_all, user_agent
 from digest.models import Item
-from tests.conftest import NetworkAccessInTestError
+from tests.conftest import NetworkAccessInTestError, load_repo_config
 
 FIXTURES = Path(__file__).parent / "fixtures"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -65,7 +66,7 @@ ASK_HN = json.loads((FIXTURES / "hn_ask_hn_null_url.json").read_text(encoding="u
 @pytest.fixture
 def hn_source() -> Source:
     """The real `hn` entry from sources.yaml -- tests the shipped config, not a stand-in."""
-    return load_config(REPO_ROOT).sources.by_name("hn")
+    return load_repo_config().sources.by_name("hn")
 
 
 def _mock_transport(payload: dict, captured: list[httpx.Request] | None = None):
@@ -234,17 +235,17 @@ def test_empty_response_is_not_an_error(hn_source):
 # ------------------------------------------------------------------- fetch-loop resilience
 
 
-class _Exploding:
+class _Exploding(Adapter):
     """An adapter that always raises, standing in for a source having a bad day."""
 
-    name = "gh_trending"
+    kind = "gh_trending"
 
     async def fetch(self, client: httpx.AsyncClient, source: Source) -> list[Item]:
         raise httpx.ConnectError("simulated outage")
 
 
 def _config_with_enabled(*names: str) -> Config:
-    config = load_config(REPO_ROOT)
+    config = load_repo_config()
     config.sources.sources = [
         source.model_copy(update={"enabled": source.name in names})
         for source in config.sources.sources
@@ -252,8 +253,13 @@ def _config_with_enabled(*names: str) -> Config:
     return config
 
 
-def run_fetch_all(config: Config, monkeypatch, payload: dict = STORIES):
-    """Drive fetch_all with every AsyncClient it builds wired to a mock transport."""
+def run_fetch_all(config: Config, monkeypatch, payload: dict = STORIES, adapters=None):
+    """Drive fetch_all with every AsyncClient it builds wired to a mock transport.
+
+    `adapters` is injected through the public API rather than monkeypatched onto a module
+    global: `fetch_all` constructs one instance per source, so there is no registry entry to
+    swap, and the mapping merges -- naming one source leaves the rest constructing normally.
+    """
     real_client = httpx.AsyncClient
 
     def client_factory(**kwargs) -> httpx.AsyncClient:
@@ -261,13 +267,16 @@ def run_fetch_all(config: Config, monkeypatch, payload: dict = STORIES):
         return real_client(**kwargs)
 
     monkeypatch.setattr(httpx, "AsyncClient", client_factory)
-    return asyncio.run(fetch_all(config))
+    return asyncio.run(fetch_all(config, adapters=adapters))
 
 
 def test_one_failing_source_never_aborts_the_run(monkeypatch):
     """CLAUDE.md's hardest guarantee. Untested resilience works until the first outage."""
-    monkeypatch.setitem(ADAPTERS, "gh_trending", _Exploding())
-    result = run_fetch_all(_config_with_enabled("hn", "gh_trending"), monkeypatch)
+    result = run_fetch_all(
+        _config_with_enabled("hn", "gh_trending"),
+        monkeypatch,
+        adapters={"gh_trending": _Exploding()},
+    )
     items = result.items
 
     assert len(items) == len(STORIES["hits"])
@@ -326,7 +335,7 @@ def test_cli_fetch_prints_items_and_health_footer(monkeypatch, capsys, tmp_path)
     # hn only. Phase 3a enabled all five sources, and without this the mocked HN payload
     # would be served to four adapters that correctly reject it -- the test would still
     # pass, but for the wrong reason.
-    monkeypatch.setattr("digest.cli.load_config", lambda _: _config_with_enabled("hn"))
+    monkeypatch.setattr("digest.cli.load_config", lambda *a, **k: _config_with_enabled("hn"))
     real_client = httpx.AsyncClient
     monkeypatch.setattr(
         httpx,
@@ -345,9 +354,12 @@ def test_cli_fetch_prints_items_and_health_footer(monkeypatch, capsys, tmp_path)
 
 def test_cli_fetch_survives_a_dead_source(monkeypatch, capsys, tmp_path):
     """The footer has to *say* a source failed -- silence is how a dead feed rots unnoticed."""
-    monkeypatch.setitem(ADAPTERS, "gh_trending", _Exploding())
     monkeypatch.setattr(
-        "digest.cli.load_config", lambda _: _config_with_enabled("hn", "gh_trending")
+        "digest.cli.load_config", lambda *a, **k: _config_with_enabled("hn", "gh_trending")
+    )
+    monkeypatch.setattr(
+        "digest.cli.fetch_all",
+        lambda config, **kw: fetch_all(config, adapters={"gh_trending": _Exploding()}),
     )
     real_client = httpx.AsyncClient
     monkeypatch.setattr(

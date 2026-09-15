@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -50,18 +51,32 @@ class FetchResult:
     notes: dict[str, list[str]] = field(default_factory=dict)
 
 
-#: Adapters by the source name in sources.yaml they serve. Keys must match `name` there;
-#: an enabled source with no adapter is a recorded failure, not a silent skip.
-ADAPTERS: dict[str, Adapter] = {
-    adapter.name: adapter
-    for adapter in (
-        HNAdapter(),
-        GhTrendingAdapter(),
-        HFPapersAdapter(),
-        AIBlogsAdapter(),
-        ArxivAdapter(),
+#: Adapter *classes* by the `kind` they implement -- not instances, and not keyed by source.
+#:
+#: The registry used to hold one long-lived instance per source name, which conflated two
+#: things: which implementation to use, and which source it serves. One class could therefore
+#: serve exactly one source, so a second RSS source wanting identical behaviour needed a
+#: subclass whose only content was a different name -- and PLAN.md section 2 Tier 2 is mostly
+#: more RSS. The shortcut, registering one instance under two names, silently shared that
+#: instance's `_notes` between two concurrently-fetched sources.
+#:
+#: `fetch_all` constructs one instance per source per run, so per-run adapter state is
+#: private by construction rather than by an invariant nobody can see.
+IMPLEMENTATIONS: dict[str, type[Adapter]] = {
+    cls.kind: cls
+    for cls in (
+        HNAdapter,
+        GhTrendingAdapter,
+        HFPapersAdapter,
+        AIBlogsAdapter,
+        ArxivAdapter,
     )
 }
+
+#: The set `config.load_sources` validates `kind` against. Injected there rather than
+#: imported, because `adapters/base.py` imports `Source` from `config` and reaching back
+#: would be a cycle.
+KNOWN_KINDS: frozenset[str] = frozenset(IMPLEMENTATIONS)
 
 DEFAULT_USER_AGENT = "AI-news-digest/0.1 (+https://github.com/YimingCao-Eric/AI-news)"
 
@@ -80,9 +95,9 @@ def user_agent() -> str:
 
 
 async def _fetch_one(
-    client: httpx.AsyncClient, source: Source
+    client: httpx.AsyncClient, source: Source, adapter: Adapter | None
 ) -> tuple[list[Item], SourceOutcome, float, list[str]]:
-    """Fetch one source. Never raises: every failure becomes a health record."""
+    """Fetch one source with the instance built for it. Never raises."""
     started = time.monotonic()
     items: list[Item] = []
     notes: list[str] = []
@@ -90,13 +105,14 @@ async def _fetch_one(
     expected = False
 
     try:
-        adapter = ADAPTERS.get(source.name)
         if adapter is None:
-            # An enabled source with no adapter is a real misconfiguration, not something to
-            # skip quietly -- it would otherwise look like a source that returns nothing.
+            # An enabled source with no implementation is a real misconfiguration, not
+            # something to skip quietly -- it would otherwise look like a source that
+            # returns nothing. `load_sources` rejects an unknown `kind` at config load, so
+            # reaching here means a Config assembled in code rather than read from disk.
             raise NoAdapterRegistered(
-                f"no adapter registered for enabled source {source.name!r}; "
-                f"registered: {', '.join(sorted(ADAPTERS)) or '(none)'}"
+                f"no adapter implements kind {source.kind!r} for enabled source "
+                f"{source.name!r}; known kinds: {', '.join(sorted(IMPLEMENTATIONS)) or '(none)'}"
             )
         async with asyncio.timeout(SOURCE_TIMEOUT_SECONDS):
             items = await adapter.fetch(client, source)
@@ -126,10 +142,11 @@ async def _fetch_one(
             )
     finally:
         # Drained even on failure: a bundle source that raised because every feed died still
-        # knows *which* feeds died, and that is the useful half of the report.
-        reporting_adapter = ADAPTERS.get(source.name)
-        if reporting_adapter is not None:
-            notes = reporting_adapter.drain_notes()
+        # knows *which* feeds died, and that is the useful half of the report. Drained from
+        # the instance we fetched with, not looked up again -- with one instance per source
+        # there is nothing to look up, and nothing to accidentally drain from a sibling.
+        if adapter is not None:
+            notes = adapter.drain_notes()
 
     duration = time.monotonic() - started
     finished_at = datetime.now(tz=UTC)
@@ -149,7 +166,32 @@ async def _fetch_one(
     return items, outcome, duration, notes
 
 
-async def fetch_all(config: Config) -> FetchResult:
+def build_adapters(
+    sources: Sequence[Source], overrides: Mapping[str, Adapter] | None = None
+) -> dict[str, Adapter | None]:
+    """One adapter instance per source, keyed by source name.
+
+    `overrides` **merges**: an injected entry replaces the instance for that source name and
+    every other source is constructed normally, so a test pinning one source's clock does not
+    have to supply the other four.
+
+    `None` for a source whose `kind` has no implementation, so `_fetch_one` can record it as
+    a failure rather than the run dying before any source is fetched.
+    """
+    overrides = overrides or {}
+    built: dict[str, Adapter | None] = {}
+    for source in sources:
+        if source.name in overrides:
+            built[source.name] = overrides[source.name]
+            continue
+        implementation = IMPLEMENTATIONS.get(source.kind)
+        built[source.name] = implementation() if implementation is not None else None
+    return built
+
+
+async def fetch_all(
+    config: Config, *, adapters: Mapping[str, Adapter] | None = None
+) -> FetchResult:
     """Fetch every enabled source concurrently.
 
     Returns everything that succeeded plus an outcome and a duration per source, in
@@ -162,11 +204,13 @@ async def fetch_all(config: Config) -> FetchResult:
         log.warning("no sources are enabled in sources.yaml; nothing to fetch")
         return FetchResult()
 
+    built = build_adapters(sources, adapters)
+
     headers = {"User-Agent": user_agent()}
     timeout = httpx.Timeout(SOURCE_TIMEOUT_SECONDS)
     async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True) as client:
         results = await asyncio.gather(
-            *(_fetch_one(client, source) for source in sources),
+            *(_fetch_one(client, source, built[source.name]) for source in sources),
             return_exceptions=True,
         )
 

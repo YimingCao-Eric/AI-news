@@ -42,7 +42,7 @@ _HN_ITEM_URL = "https://news.ycombinator.com/item?id={object_id}"
 
 
 class HNAdapter(Adapter):
-    name = "hn"
+    kind = "hn"
 
     async def fetch(self, client: httpx.AsyncClient, source: Source) -> list[Item]:
         base_url, params = build_request(source, now=datetime.now(tz=UTC))

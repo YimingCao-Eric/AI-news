@@ -34,8 +34,14 @@ from digest.models import Item
 class Adapter(ABC):
     """Fetches one source and maps it to `Item`s. See the module docstring for the contract."""
 
-    #: Must match the `name` of the source in sources.yaml this adapter serves.
-    name: str
+    #: Which implementation this is. Matches the `kind` of every source it serves.
+    #:
+    #: NOT the source's name. This attribute used to hold the source name, which made one
+    #: class serve exactly one source: the registry key *was* the class attribute, so a
+    #: second source wanting the same behaviour needed a subclass whose only content was a
+    #: different name. `kind` is the implementation; `Source.name` is the source; `fetch_all`
+    #: constructs one instance per source from the class its `kind` selects.
+    kind: str
 
     @abstractmethod
     async def fetch(self, client: httpx.AsyncClient, source: Source) -> list[Item]:
@@ -60,8 +66,12 @@ class Adapter(ABC):
         be *reported*, not silently absent -- but adapters may not log or print, so they
         hand the strings back and `fetch.py` owns the output.
 
-        Safe as instance state because each adapter instance serves exactly one source, and
-        `fetch_all` runs one coroutine per source. Draining keeps one run's notes out of the
-        next. Adapters with nothing to say inherit this and return nothing.
+        Safe as instance state because `fetch_all` constructs one instance per source per
+        run -- structurally, not by convention. It previously held instances in a
+        process-lifetime registry keyed by source name, where the safety argument was a
+        docstring: register one instance under two names and two concurrent coroutines share
+        `self._notes`, silently attributing one source's feed diagnostics to the other with
+        no exception and no failing test. Per-source construction removes the possibility.
+        Adapters with nothing to say inherit this and return nothing.
         """
         return []

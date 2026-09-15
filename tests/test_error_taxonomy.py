@@ -20,7 +20,7 @@ from digest.errors import (
     SourcePayloadError,
     unmappable_entry,
 )
-from digest.fetch import ADAPTERS, fetch_all
+from digest.fetch import fetch_all
 from digest.models import SourceOutcome
 from tests.conftest import REPO_ROOT, NetworkAccessInTestError, fixture_json
 from tests.test_hn import _config_with_enabled
@@ -31,7 +31,7 @@ STORIES = fixture_json("hn_search_by_date.json")
 class _Anticipated(Adapter):
     """An adapter reporting a failure it planned for."""
 
-    name = "gh_trending"
+    kind = "gh_trending"
 
     async def fetch(self, client, source):
         raise SourcePayloadError("selectors matched nothing")
@@ -40,7 +40,7 @@ class _Anticipated(Adapter):
 class _Crashing(Adapter):
     """An adapter with a coding mistake in it."""
 
-    name = "gh_trending"
+    kind = "gh_trending"
 
     async def fetch(self, client, source):
         return None + 1  # noqa: RUF100 -- deliberate TypeError
@@ -49,15 +49,14 @@ class _Crashing(Adapter):
 class _ControlFailure(Adapter):
     """A harness invariant breaking inside an adapter."""
 
-    name = "gh_trending"
+    kind = "gh_trending"
 
     async def fetch(self, client, source):
         raise NetworkAccessInTestError("hn.algolia.com")
 
 
-def _run(monkeypatch, adapter, enabled=("hn", "gh_trending")):
+def _run(monkeypatch, adapter, enabled=("hn", "gh_trending"), source_name="gh_trending"):
     real_client = httpx.AsyncClient
-    monkeypatch.setitem(ADAPTERS, adapter.name, adapter)
     monkeypatch.setattr(
         httpx,
         "AsyncClient",
@@ -65,7 +64,7 @@ def _run(monkeypatch, adapter, enabled=("hn", "gh_trending")):
             **{**kw, "transport": httpx.MockTransport(lambda r: httpx.Response(200, json=STORIES))}
         ),
     )
-    return asyncio.run(fetch_all(_config_with_enabled(*enabled)))
+    return asyncio.run(fetch_all(_config_with_enabled(*enabled), adapters={source_name: adapter}))
 
 
 # ------------------------------------------------- the shared base, and what it must survive
@@ -99,8 +98,14 @@ def test_a_control_error_reaching_the_cli_is_its_own_exit_code(monkeypatch, tmp_
     4 means the environment failed and tomorrow may work, so a scheduler retries. 70 means
     the program's own assumptions are broken, so retrying cannot help.
     """
-    monkeypatch.setattr("digest.cli.load_config", lambda _: _config_with_enabled("gh_trending"))
-    monkeypatch.setitem(ADAPTERS, "gh_trending", _ControlFailure())
+    monkeypatch.setattr(
+        "digest.cli.load_config", lambda *a, **k: _config_with_enabled("gh_trending")
+    )
+    real = fetch_all
+    monkeypatch.setattr(
+        "digest.cli.fetch_all",
+        lambda config, **kw: real(config, adapters={"gh_trending": _ControlFailure()}),
+    )
 
     with caplog.at_level(logging.ERROR):
         code = main(["fetch", "--config-dir", str(REPO_ROOT), "--db", str(tmp_path / "t.db")])
@@ -185,8 +190,14 @@ def test_an_unregistered_adapter_is_anticipated_not_a_crash(monkeypatch):
             **{**kw, "transport": httpx.MockTransport(lambda r: httpx.Response(200, json=STORIES))}
         ),
     )
-    monkeypatch.delitem(ADAPTERS, "arxiv_cs_ai")
-    result = asyncio.run(fetch_all(_config_with_enabled("arxiv_cs_ai")))
+    # A Config assembled in code can carry a kind no implementation covers; `load_sources`
+    # rejects that at config load, so this is the path that survives for programmatic configs.
+    config = _config_with_enabled("arxiv_cs_ai")
+    config.sources.sources = [
+        s.model_copy(update={"kind": "no_such_kind"}) if s.name == "arxiv_cs_ai" else s
+        for s in config.sources.sources
+    ]
+    result = asyncio.run(fetch_all(config))
 
     outcome = result.outcomes[0]
     assert not outcome.succeeded
@@ -236,7 +247,7 @@ def test_the_outcome_refuses_to_classify_a_success():
 
 
 def test_exit_ok_is_unchanged_for_a_healthy_run(monkeypatch, tmp_path):
-    monkeypatch.setattr("digest.cli.load_config", lambda _: _config_with_enabled("hn"))
+    monkeypatch.setattr("digest.cli.load_config", lambda *a, **k: _config_with_enabled("hn"))
     real_client = httpx.AsyncClient
     monkeypatch.setattr(
         httpx,

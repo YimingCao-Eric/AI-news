@@ -21,7 +21,7 @@ from digest.adapters.gh_trending import (
     parse_trending,
 )
 from digest.errors import AdapterError, SourceBlockedError
-from tests.conftest import configured_source, fixture_text, run_adapter, serve
+from tests.conftest import configured_source, fixture_text, load_repo_config, run_adapter, serve
 
 PAGE = fixture_text("gh_trending.html")
 
@@ -178,11 +178,8 @@ def test_raw_contains_no_clock():
     class it exists to catch.
     """
     import json
-    from pathlib import Path
 
-    from digest.config import load_config
-
-    source = load_config(Path(__file__).resolve().parents[1]).sources.by_name("gh_trending")
+    source = load_repo_config().sources.by_name("gh_trending")
     items = run_adapter(GhTrendingAdapter(), source, serve(PAGE, 200, "text/html"))
 
     assert set(items[0].raw) == {"full_name", "description", "language", "stars_today"}

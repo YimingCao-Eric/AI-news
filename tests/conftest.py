@@ -29,8 +29,9 @@ import httpx
 import pytest
 
 from digest.adapters.base import Adapter
-from digest.config import InterestProfile, Source, load_config
+from digest.config import Config, InterestProfile, Source, load_config
 from digest.errors import DigestControlError
+from digest.fetch import KNOWN_KINDS
 from digest.models import Item
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -46,13 +47,24 @@ def fixture_json(name: str) -> Any:
     return json.loads(fixture_text(name))
 
 
+def load_repo_config() -> Config:
+    """The shipped config, with the registry's kinds supplied.
+
+    `load_config` requires `known_kinds` rather than importing the registry, because
+    `adapters/base.py` imports `Source` from `config` and reaching back would be a cycle.
+    Required rather than optional so a caller who forgets gets a TypeError instead of
+    silently unvalidated config.
+    """
+    return load_config(REPO_ROOT, known_kinds=KNOWN_KINDS)
+
+
 def configured_source(name: str) -> Source:
     """The real entry from sources.yaml -- tests the shipped config, not a stand-in."""
-    return load_config(REPO_ROOT).sources.by_name(name)
+    return load_repo_config().sources.by_name(name)
 
 
 def configured_interests() -> InterestProfile:
-    return load_config(REPO_ROOT).interests
+    return load_repo_config().interests
 
 
 def fixture_captured_at() -> datetime:

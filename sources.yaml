@@ -7,10 +7,17 @@
 #               re-run over history offline (PLAN.md section 4). `null` means unlimited.
 # `enabled`     config intent. Distinct from the runtime health record in the `sources`
 #               table, which tracks consecutive_failures.
+# `kind`        which adapter IMPLEMENTATION serves this source; `name` identifies the
+#               source itself. They coincide today because each implementation serves
+#               exactly one source -- a second RSS source would declare an existing kind,
+#               and that is the moment to rename the implementation. `kind` never says
+#               how many endpoints a source has: that is `url` vs `feeds`, normalised by
+#               `Source.endpoints`, and adapters iterate rather than ask. An unknown kind
+#               is rejected when this file loads, not when the source is fetched.
 
 sources:
   - name: hn
-    kind: json_api
+    kind: hn
     # search_by_date, not tags=front_page: this job runs once a day at 07:00, and a
     # front-page snapshot misses anything that peaked at 03:00 and rolled off. The points
     # floor matches interests.yaml hard_rules.min_hn_points.
@@ -28,7 +35,7 @@ sources:
     enabled: true
 
   - name: gh_trending
-    kind: html
+    kind: gh_trending
     # No official API and never has been; the HTML is stable. Mirror feeds exist
     # (mshibanami/GitHubTrendingRSS) if the scrape turns out to be a maintenance burden.
     url: "https://github.com/trending?since=daily&spoken_language_code=en"
@@ -37,7 +44,7 @@ sources:
     enabled: true
 
   - name: hf_papers
-    kind: json_api
+    kind: hf_papers
     # The curated daily-papers feed -- far better signal than raw new-model listings.
     url: "https://huggingface.co/api/daily_papers"
     weight: 1.1
@@ -45,7 +52,7 @@ sources:
     enabled: true
 
   - name: ai_blogs
-    kind: rss
+    kind: ai_blogs
     # A bundle: six endpoints sharing one weight, one fetch budget and one health record.
     # Rule is official feed first, community mirror only where no official feed exists.
     #
@@ -95,7 +102,7 @@ sources:
     enabled: true
 
   - name: arxiv_cs_ai
-    kind: rss
+    kind: arxiv
     # A bundle, despite the name: one adapter serves several categories.
     #
     # VOLUME MEASURED 2026-09-14: cs.AI 270 entries, cs.CL 115, cs.MA 16. Not the ~50/day

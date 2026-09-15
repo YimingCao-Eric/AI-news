@@ -18,7 +18,7 @@ from pathlib import Path
 from digest import store
 from digest.config import Config, ConfigError, load_config, summarise_config
 from digest.errors import DigestControlError
-from digest.fetch import FetchResult, fetch_all
+from digest.fetch import KNOWN_KINDS, FetchResult, fetch_all
 from digest.models import Item, SourceHealth, SourceOutcome
 from digest.store import StoreError
 
@@ -401,7 +401,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     logging.getLogger("digest").setLevel(logging.DEBUG if args.verbose else logging.INFO)
 
     try:
-        config = load_config(args.config_dir)
+        config = load_config(args.config_dir, known_kinds=KNOWN_KINDS)
     except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE_OR_CONFIG
