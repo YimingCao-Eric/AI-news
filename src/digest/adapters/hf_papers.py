@@ -13,6 +13,7 @@ import httpx
 
 from digest.adapters.base import Adapter
 from digest.config import Source
+from digest.errors import SourcePayloadError, unmappable_entry
 from digest.models import Item
 
 PAPER_URL = "https://huggingface.co/papers/{paper_id}"
@@ -32,7 +33,7 @@ class HFPapersAdapter(Adapter):
         payload = response.json()
 
         if not isinstance(payload, list):
-            raise TypeError(
+            raise SourcePayloadError(
                 f"{source.name}: expected a JSON list from {source.url}, got "
                 f"{type(payload).__name__}. The API shape has changed."
             )
@@ -40,7 +41,7 @@ class HFPapersAdapter(Adapter):
             # CLAUDE.md zero-items rule: raise. daily_papers is a fixed curated list that is
             # never empty; zero means the endpoint changed, and returning [] would be
             # indistinguishable from a quiet day forever after.
-            raise ValueError(
+            raise SourcePayloadError(
                 f"{source.name}: {source.url} returned 200 with zero papers. This endpoint "
                 f"publishes ~50 every day, so zero means its shape changed, not that the "
                 f"day was quiet. Re-record the fixture and check the mapping."
@@ -59,19 +60,25 @@ def _item_from_entry(entry: dict[str, Any], source_name: str) -> Item | None:
     if not paper_id or not title:
         return None
 
-    return Item(
-        url=PAPER_URL.format(paper_id=paper_id),
-        title=_WHITESPACE.sub(" ", title).strip(),
-        source=source_name,
-        author=_submitter(entry),
-        published_at=_published_at(entry),
-        # The whole entry, unedited. `paper.summary` is a full abstract (~1.1 KB) and
-        # belongs here rather than in a truncated field: CLAUDE.md forbids summarising
-        # article bodies, and PLAN.md section 4 wants the payload intact so phase 4 can
-        # re-score history. `paper.upvotes`, `githubRepo` and `ai_keywords` ride along for
-        # free and are exactly what a later ranker will want.
-        raw=entry,
-    )
+    url = PAPER_URL.format(paper_id=paper_id)
+    try:
+        return Item(
+            url=url,
+            title=_WHITESPACE.sub(" ", title).strip(),
+            source=source_name,
+            author=_submitter(entry),
+            published_at=_published_at(entry),
+            # The whole entry, unedited. `paper.summary` is a full abstract (~1.1 KB) and
+            # belongs here rather than in a truncated field: CLAUDE.md forbids summarising
+            # article bodies, and PLAN.md section 4 wants the payload intact so phase 4 can
+            # re-score history.
+            raw=entry,
+        )
+    # ValidationError is a ValueError subclass, so this also catches a date string the
+    # parser rejects *before* the model sees it -- which is where a malformed entry
+    # actually escaped first, naming nothing.
+    except ValueError as exc:
+        raise unmappable_entry(source_name, None, url, exc) from exc
 
 
 def _submitter(entry: dict[str, Any]) -> str | None:

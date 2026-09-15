@@ -23,6 +23,7 @@ from feedparser.util import FeedParserDict
 
 from digest.adapters.base import Adapter
 from digest.config import Feed, Source
+from digest.errors import SourcePayloadError, unmappable_entry
 from digest.models import Item
 
 #: Per-feed budget, deliberately well under fetch.py's 20s whole-source budget.
@@ -132,7 +133,7 @@ class AIBlogsAdapter(Adapter):
 
         if failures == len(feeds):
             # Every feed down at once is a network or mirror outage, not six quiet blogs.
-            raise RuntimeError(
+            raise SourcePayloadError(
                 f"{source.name}: all {failures} feeds failed. Notes: {'; '.join(self._notes)}"
             )
 
@@ -143,7 +144,7 @@ class AIBlogsAdapter(Adapter):
             # nobody published. Note this counts *entries*, not items -- feeds full of
             # entries that are all older than MAX_ENTRY_AGE_DAYS are stale, not broken, and
             # the per-feed STALE notes already say so.
-            raise RuntimeError(
+            raise SourcePayloadError(
                 f"{source.name}: all {len(feeds)} feeds parsed cleanly and contained zero "
                 f"entries between them. One quiet blog is normal, six is not. Re-record the "
                 f"fixtures and check the mapping. Notes: {'; '.join(self._notes)}"
@@ -169,7 +170,7 @@ class AIBlogsAdapter(Adapter):
 
         parsed = feedparser.parse(response.text)
         if parsed.bozo and not parsed.entries:
-            raise ValueError(
+            raise SourcePayloadError(
                 f"{source_name}/{feed.name}: unparseable XML from {feed.url} "
                 f"({parsed.bozo_exception})"
             )
@@ -259,14 +260,20 @@ def _item_from_entry(entry: FeedParserDict, source_name: str, feed_name: str) ->
     # untraceable once its items are mixed into one source's output.
     raw["feed_name"] = feed_name
 
-    return Item(
-        url=link,
-        title=_WHITESPACE.sub(" ", title).strip(),
-        source=source_name,
-        author=entry.get("author"),
-        published_at=_published_at(entry),
-        raw=raw,
-    )
+    try:
+        return Item(
+            url=link,
+            title=_WHITESPACE.sub(" ", title).strip(),
+            source=source_name,
+            author=entry.get("author"),
+            published_at=_published_at(entry),
+            raw=raw,
+        )
+    # ValidationError is a ValueError subclass, so this also catches a date string the
+    # parser rejects *before* the model sees it -- which is where a malformed entry
+    # actually escaped first, naming nothing.
+    except ValueError as exc:
+        raise unmappable_entry(source_name, feed_name, link, exc) from exc
 
 
 def _published_at(entry: FeedParserDict) -> datetime | None:

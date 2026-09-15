@@ -22,6 +22,7 @@ from digest.adapters.gh_trending import GhTrendingAdapter
 from digest.adapters.hf_papers import HFPapersAdapter
 from digest.adapters.hn import HNAdapter
 from digest.config import Config, Source
+from digest.errors import AdapterError, NoAdapterRegistered
 from digest.models import Item, SourceOutcome
 
 log = logging.getLogger(__name__)
@@ -86,23 +87,43 @@ async def _fetch_one(
     items: list[Item] = []
     notes: list[str] = []
     error: str | None = None
+    expected = False
 
     try:
         adapter = ADAPTERS.get(source.name)
         if adapter is None:
             # An enabled source with no adapter is a real misconfiguration, not something to
             # skip quietly -- it would otherwise look like a source that returns nothing.
-            raise LookupError(
+            raise NoAdapterRegistered(
                 f"no adapter registered for enabled source {source.name!r}; "
                 f"registered: {', '.join(sorted(ADAPTERS)) or '(none)'}"
             )
         async with asyncio.timeout(SOURCE_TIMEOUT_SECONDS):
             items = await adapter.fetch(client, source)
-    # Deliberately broad: CLAUDE.md requires that no source can abort the run, so anything
-    # an adapter can raise -- including bugs in the adapter itself -- has to be contained.
+    # Deliberately broad, and deliberately NOT narrowed to AdapterError: CLAUDE.md requires
+    # that no source can abort the run, so anything an adapter can raise -- including bugs in
+    # the adapter itself -- has to be contained. Narrowing to the named base would let an
+    # accidental TypeError escape this handler and bypass both the health record and the
+    # `finally` notes drain, which is the opposite of what the taxonomy is for.
+    #
+    # The named base CLASSIFIES what was caught. It never changes what is caught.
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
-        log.warning("source %s failed: %s", source.name, error, exc_info=True)
+        expected = isinstance(exc, AdapterError)
+        if expected:
+            # The adapter anticipated this: a 403, a changed payload, every feed empty.
+            # Actionable as "check the source", and routine enough not to want a traceback.
+            log.warning("source %s failed: %s", source.name, error)
+        else:
+            # Nobody anticipated this, so it is a bug in our code until proven otherwise.
+            # Previously indistinguishable from the line above, which is how a coding mistake
+            # filed itself as a dead feed and cost you a morning checking a healthy source.
+            log.error(
+                "source %s CRASHED (this is a bug in the adapter, not the source): %s",
+                source.name,
+                error,
+                exc_info=True,
+            )
     finally:
         # Drained even on failure: a bundle source that raised because every feed died still
         # knows *which* feeds died, and that is the useful half of the report.
@@ -117,7 +138,9 @@ async def _fetch_one(
     outcome = (
         SourceOutcome(name=source.name, succeeded_at=finished_at)
         if error is None
-        else SourceOutcome(name=source.name, failed_at=finished_at)
+        else SourceOutcome(
+            name=source.name, failed_at=finished_at, error=error, expected_failure=expected
+        )
     )
 
     # CLAUDE.md's one-line-per-source run log is emitted by the caller, not here: the "new
@@ -162,7 +185,15 @@ async def fetch_all(config: Config) -> FetchResult:
             # Belt and braces: _fetch_one catches every Exception, so reaching here means a
             # bug in the wrapper itself. Still must not abort the run.
             log.error("source %s failed outside the adapter wrapper", source.name, exc_info=result)
-            outcomes.append(SourceOutcome(name=source.name, failed_at=datetime.now(tz=UTC)))
+            outcomes.append(
+                SourceOutcome(
+                    name=source.name,
+                    failed_at=datetime.now(tz=UTC),
+                    error=f"{type(result).__name__}: {result}",
+                    # Reaching here means the wrapper itself broke, which nobody anticipated.
+                    expected_failure=False,
+                )
+            )
             durations[source.name] = 0.0
             continue
         source_items, outcome, duration, source_notes = result

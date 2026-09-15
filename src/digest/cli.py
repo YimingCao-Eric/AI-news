@@ -17,6 +17,7 @@ from pathlib import Path
 
 from digest import store
 from digest.config import Config, ConfigError, load_config, summarise_config
+from digest.errors import DigestControlError
 from digest.fetch import FetchResult, fetch_all
 from digest.models import Item, SourceHealth, SourceOutcome
 from digest.store import StoreError
@@ -35,15 +36,16 @@ DEFAULT_DB_FILENAME = "digest.db"
 # thresholds instead of one global number. "Three of five died" is carried by the footer and
 # the per-source log line, which is why SF-2 made that line visible without -v.
 #
-# NOTE FOR THEME 4: `DigestControlError` will need its own code. It means an invariant of the
-# program's own execution was violated, which in production should never happen -- so it
-# wants something like 70 (EX_SOFTWARE), not EXIT_ALL_SOURCES_FAILED. Decide it there rather
-# than letting it fall into 4.
+# `DigestControlError` gets 70 (EX_SOFTWARE) rather than falling into 4. The distinction is
+# actionable: 4 means the environment failed and tomorrow may work, so retry; 70 means the
+# program's own assumptions are broken, so retrying cannot help and a human must look. It
+# should never occur in production at all.
 EXIT_OK = 0
 EXIT_USAGE_OR_CONFIG = 2
 EXIT_STORAGE = 3
 EXIT_ALL_SOURCES_FAILED = 4
 EXIT_INTERRUPTED = 130  # 128 + SIGINT, the shell convention cron and CI already understand
+EXIT_INTERNAL_ERROR = 70  # EX_SOFTWARE: a DigestControlError reached the top. A bug.
 # ------------------------------------------------------------------------------------------
 
 log = logging.getLogger(__name__)
@@ -164,9 +166,9 @@ def _run_render(config: Config, args: argparse.Namespace) -> int:
             print(f"{'':>17}{item.url}")
         print()
 
-    print(_health_summary(items, health))
+    print(_health_summary(items, health, enabled={s.name for s in config.sources.enabled}))
     print("\n(digest_date is not stamped until phase 3c, so these stay 'new'.)")
-    return 0
+    return EXIT_OK
 
 
 def _exit_code_for(result: FetchResult) -> int:
@@ -216,8 +218,21 @@ def _log_source_line(
         "-" if new is None else new,
         "-" if dupes is None else dupes,
         duration,
-        "ok" if outcome.succeeded else "failed",
+        _status_word(outcome),
     )
+
+
+def _status_word(outcome: SourceOutcome) -> str:
+    """`ok`, `failed`, or `CRASHED`.
+
+    The distinction VN-4 found missing: a deliberate SourcePayloadError meaning "the API
+    returned a dict, not a list" and an accidental TypeError from a coding mistake produced
+    the same word. The first means re-record a fixture; the second means revert a commit, and
+    you would spend the morning checking a healthy source before discovering which.
+    """
+    if outcome.succeeded:
+        return "ok"
+    return "failed" if outcome.expected_failure else "CRASHED"
 
 
 def _health_summary(
@@ -401,6 +416,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (StoreError, sqlite3.Error) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_STORAGE
+    except DigestControlError:
+        # Never expected in production: an assumption about our own execution was violated,
+        # not a source misbehaving. The traceback is the whole point, so it is logged rather
+        # than summarised -- this is the one failure where you want the stack, not a status.
+        log.exception("internal error: the program's own assumptions were violated")
+        return EXIT_INTERNAL_ERROR
     except KeyboardInterrupt:
         # Phase 1 established that an operator quitting must not be recorded as a dead feed.
         # The same distinction has to reach the exit status, or a scheduler reads Ctrl-C as

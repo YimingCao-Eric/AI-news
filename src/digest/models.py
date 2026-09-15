@@ -97,6 +97,16 @@ class SourceOutcome(BaseModel):
     succeeded_at: datetime | None = None
     #: When this run failed. None means it did not.
     failed_at: datetime | None = None
+    #: The failure, as text. Only meaningful alongside `failed_at`.
+    error: str | None = None
+    #: True when the adapter *anticipated* the failure and raised a named `AdapterError`;
+    #: False when it crashed with something nobody planned for.
+    #:
+    #: This is the our-bug-versus-their-outage distinction, carried from `fetch.py`'s catch
+    #: site to the run log and the footer. Deliberately NOT persisted to the `sources` table:
+    #: "which runs crashed" is run provenance, which is SF-4/SF-5 and deferred against phase
+    #: 4's runs table. Visible in the run that produced it, not stored.
+    expected_failure: bool = False
 
     @field_validator("succeeded_at", "failed_at")
     @classmethod
@@ -105,6 +115,8 @@ class SourceOutcome(BaseModel):
 
     @model_validator(mode="after")
     def _exactly_one_instant(self) -> "SourceOutcome":
+        if self.succeeded_at is not None and (self.error or self.expected_failure):
+            raise ValueError(f"source {self.name!r}: a successful run has no error to classify.")
         if (self.succeeded_at is None) == (self.failed_at is None):
             both = self.succeeded_at is not None
             raise ValueError(

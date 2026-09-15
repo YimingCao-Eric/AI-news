@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 from digest.adapters.hf_papers import HFPapersAdapter
+from digest.errors import SourcePayloadError
 from tests.conftest import configured_source, fixture_json, run_adapter, serve
 
 PAPERS = fixture_json("hf_papers.json")
@@ -89,12 +90,12 @@ def test_zero_papers_raises_rather_than_returning_empty(source):
     daily_papers publishes ~50 every day, so zero means the shape changed. Returning [] would
     be indistinguishable from a quiet day, forever.
     """
-    with pytest.raises(ValueError, match="zero papers"):
+    with pytest.raises(SourcePayloadError, match="zero papers"):
         fetch([], source)
 
 
 def test_non_list_payload_raises(source):
-    with pytest.raises(TypeError, match="expected a JSON list"):
+    with pytest.raises(SourcePayloadError, match="expected a JSON list"):
         fetch({"papers": []}, source)
 
 

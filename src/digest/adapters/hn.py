@@ -15,6 +15,7 @@ import httpx
 
 from digest.adapters.base import Adapter
 from digest.config import Source
+from digest.errors import unmappable_entry
 from digest.models import Item
 
 #: Placeholder in the configured URL's query string, replaced with a unix timestamp.
@@ -97,20 +98,27 @@ def _item_from_hit(hit: dict[str, Any], source_name: str) -> Item | None:
     if not title or not object_id:
         return None
 
-    return Item(
-        # Ask HN / Show HN and other text posts have no outbound url; the discussion
-        # thread is the artefact in that case.
-        url=hit.get("url") or _HN_ITEM_URL.format(object_id=object_id),
-        title=title,
-        source=source_name,
-        author=hit.get("author"),
-        published_at=_published_at(hit),
-        # The whole hit, unedited -- `_highlightResult` included. PLAN.md section 4 keeps the
-        # original payload so phase 4 can re-score weeks of history after the ranker changes,
-        # and the field you did not think you needed is the one you will want then. "raw is
-        # raw" is worth more than the kilobytes; a documented exception invites undocumented ones.
-        raw=hit,
-    )
+    url = hit.get("url") or _HN_ITEM_URL.format(object_id=object_id)
+    try:
+        return Item(
+            # Ask HN / Show HN and other text posts have no outbound url; the discussion
+            # thread is the artefact in that case.
+            url=url,
+            title=title,
+            source=source_name,
+            author=hit.get("author"),
+            published_at=_published_at(hit),
+            # The whole hit, unedited -- `_highlightResult` included. PLAN.md section 4
+            # keeps the original payload so phase 4 can re-score weeks of history after the
+            # ranker changes, and the field you did not think you needed is the one you will
+            # want then. "raw is raw" is worth more than the kilobytes.
+            raw=hit,
+        )
+    # ValidationError is a ValueError subclass, so this also catches a date string the
+    # parser rejects *before* the model sees it -- which is where a malformed entry
+    # actually escaped first, naming nothing.
+    except ValueError as exc:
+        raise unmappable_entry(source_name, None, url, exc) from exc
 
 
 def _published_at(hit: dict[str, Any]) -> datetime | None:

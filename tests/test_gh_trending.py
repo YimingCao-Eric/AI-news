@@ -20,6 +20,7 @@ from digest.adapters.gh_trending import (
     GitHubTrendingError,
     parse_trending,
 )
+from digest.errors import AdapterError, SourceBlockedError
 from tests.conftest import configured_source, fixture_text, run_adapter, serve
 
 PAGE = fixture_text("gh_trending.html")
@@ -100,7 +101,7 @@ def test_403_raises_with_an_actionable_message(source):
     Without the explicit check, a block would look exactly like a quiet day.
     """
     body = "<html><body><h1>Access denied</h1></body></html>"
-    with pytest.raises(GitHubTrendingError, match="403"):
+    with pytest.raises(SourceBlockedError, match="403"):
         fetch(source, body, status=403)
 
 
@@ -188,3 +189,16 @@ def test_raw_contains_no_clock():
     first = json.dumps(items[0].raw, sort_keys=True)
     again = run_adapter(GhTrendingAdapter(), source, serve(PAGE, 200, "text/html"))
     assert json.dumps(again[0].raw, sort_keys=True) == first
+
+
+def test_a_blocked_host_and_a_broken_layout_are_different_failures():
+    """Both are anticipated, but the 07:00 response differs.
+
+    `SourceBlockedError` means check the User-Agent and back off; `GitHubTrendingError`
+    means the selectors moved and the fixture needs re-recording. Before the taxonomy both
+    were `GitHubTrendingError`, and both were indistinguishable from a crash.
+    """
+    assert issubclass(SourceBlockedError, AdapterError)
+    assert issubclass(GitHubTrendingError, AdapterError)
+    assert not issubclass(GitHubTrendingError, SourceBlockedError)
+    assert not issubclass(SourceBlockedError, GitHubTrendingError)

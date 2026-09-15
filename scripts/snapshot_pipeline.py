@@ -42,6 +42,7 @@ import pytest
 from digest import store
 from digest.adapters.ai_blogs import AIBlogsAdapter
 from digest.config import Config, load_config
+from digest.errors import DigestControlError
 from digest.fetch import ADAPTERS, fetch_all
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -50,21 +51,18 @@ SNAPSHOT_PATH = REPO_ROOT / "tests" / "snapshots" / "pipeline.txt"
 MANIFEST_PATH = FIXTURES / "manifest.json"
 
 
-class SnapshotError(BaseException):
+class SnapshotError(DigestControlError):
     """The snapshot cannot be generated faithfully.
 
-    Derives from BaseException, not Exception, for the same reason
-    `tests.conftest.NetworkAccessInTestError` does -- and this recurrence is itself the
-    argument for the idiom.
+    A `DigestControlError`: the harness guarantees every request is served from a fixture,
+    and a missing route violates that assumption about its own execution rather than telling
+    you something about a source.
 
-    A missing fixture route raises inside an adapter, where `fetch.py` catches every
-    `Exception` so that no source can abort a run. As a RuntimeError this was duly caught,
-    filed as "source failed", and `generate()` carried on to emit a *quietly smaller
-    snapshot* -- a broken harness reported as a dead feed. Correct production behaviour
-    producing a wrong answer for a test tool.
-
-    Outside `Exception`, it propagates through the resilience layer and fails loudly, which
-    is what a broken harness should do.
+    Why the base sits outside `Exception` is recorded once, in digest.errors. The short
+    version, because this file is where it bit: as a RuntimeError, a missing fixture route
+    raised inside an adapter was caught by fetch.py's no-source-may-abort handler, filed as
+    "source failed", and `generate()` carried on to emit a quietly *smaller* snapshot -- a
+    broken harness reported as a dead feed.
     """
 
 

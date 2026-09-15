@@ -14,6 +14,7 @@ from feedparser.util import FeedParserDict
 
 from digest.adapters.base import Adapter
 from digest.config import Feed, Source
+from digest.errors import SourcePayloadError, unmappable_entry
 from digest.models import Item
 
 #: arXiv marks each entry with why it appeared. `new` is a first announcement and `cross` is
@@ -80,7 +81,7 @@ class ArxivAdapter(Adapter):
             self._notes.append(f"{feed.name}: {len(kept)} new/cross of {total_entries} entries")
 
         if failures == len(feeds):
-            raise RuntimeError(
+            raise SourcePayloadError(
                 f"{source.name}: every category failed ({failures}/{len(feeds)}). "
                 f"Notes: {'; '.join(self._notes)}"
             )
@@ -89,7 +90,7 @@ class ArxivAdapter(Adapter):
             # Every category parsed and every one was empty. arXiv is genuinely quiet on some
             # days, but not on all three categories at once with well-formed documents --
             # CLAUDE.md's zero-items rule: that is "we no longer understand this endpoint".
-            raise RuntimeError(
+            raise SourcePayloadError(
                 f"{source.name}: all {len(feeds)} categories parsed cleanly and announced "
                 f"zero entries between them. One quiet category is normal; all of them is "
                 f"the feed shape changing. Re-record the fixtures and check the mapping. "
@@ -118,7 +119,7 @@ class ArxivAdapter(Adapter):
         parsed = feedparser.parse(response.text)
         if parsed.bozo and not parsed.entries:
             # Malformed XML *and* nothing parsed: we no longer understand this endpoint.
-            raise ValueError(
+            raise SourcePayloadError(
                 f"{source_name}/{feed.name}: {feed.url} returned unparseable XML "
                 f"({parsed.bozo_exception}). Zero entries from a broken document is not a "
                 f"quiet day."
@@ -169,17 +170,23 @@ def _item_from_entry(entry: FeedParserDict, source_name: str, feed_name: str) ->
     raw = dict(entry)
     raw["feed_name"] = feed_name
 
-    return Item(
-        url=link,
-        title=clean_title(title),
-        source=source_name,
-        author=entry.get("author"),
-        published_at=_published_at(entry),
-        # The abstract stays in `summary` here, untouched. CLAUDE.md forbids fetching or
-        # summarising bodies; keeping the one the feed already gave us costs nothing and is
-        # what phase 4 will re-score against.
-        raw=raw,
-    )
+    try:
+        return Item(
+            url=link,
+            title=clean_title(title),
+            source=source_name,
+            author=entry.get("author"),
+            published_at=_published_at(entry),
+            # The abstract stays in `summary` here, untouched. CLAUDE.md forbids fetching or
+            # summarising bodies; keeping the one the feed already gave us costs nothing and
+            # is what phase 4 will re-score against.
+            raw=raw,
+        )
+    # ValidationError is a ValueError subclass, so this also catches a date string the
+    # parser rejects *before* the model sees it -- which is where a malformed entry
+    # actually escaped first, naming nothing.
+    except ValueError as exc:
+        raise unmappable_entry(source_name, feed_name, link, exc) from exc
 
 
 def _published_at(entry: FeedParserDict) -> datetime | None:

@@ -30,6 +30,7 @@ import pytest
 
 from digest.adapters.base import Adapter
 from digest.config import InterestProfile, Source, load_config
+from digest.errors import DigestControlError
 from digest.models import Item
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -126,14 +127,14 @@ _real_getaddrinfo = socket.getaddrinfo
 _real_create_connection = socket.create_connection
 
 
-class NetworkAccessInTestError(BaseException):
+class NetworkAccessInTestError(DigestControlError):
     """Raised when a test tries to open a non-loopback connection.
 
-    Derives from BaseException, not Exception, on purpose. `fetch.py` catches every
-    `Exception` so that no source can abort a run -- which is correct in production but
-    would turn a leaking test into a silently empty result rather than a failure. Sitting
-    outside `Exception`, like KeyboardInterrupt, means this propagates through the
-    resilience layer and fails the test that leaked.
+    A `DigestControlError`: the suite guarantees it cannot reach the network, and that
+    assumption about its own execution has been violated -- no feed did anything wrong.
+    The base carries the BaseException reasoning that used to be duplicated here and in
+    `scripts/snapshot_pipeline.py`, discovered independently both times by a test failing
+    with the wrong message.
     """
 
     def __init__(self, target: object) -> None:

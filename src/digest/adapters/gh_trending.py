@@ -18,6 +18,7 @@ from selectolax.parser import HTMLParser, Node
 
 from digest.adapters.base import Adapter
 from digest.config import Source
+from digest.errors import SourceBlockedError, SourcePayloadError
 from digest.models import Item
 
 # --- Selectors. Verified 2026-09-14. Change here, not inline. ----------------------------
@@ -34,8 +35,14 @@ _STARS_TODAY = re.compile(r"([\d,]+)\s+stars?\s+today")
 _WHITESPACE = re.compile(r"\s+")
 
 
-class GitHubTrendingError(RuntimeError):
-    """The page no longer looks like GitHub Trending."""
+class GitHubTrendingError(SourcePayloadError):
+    """The page no longer looks like GitHub Trending.
+
+    Kept as a name rather than folded away: it is the one adapter error anyone has ever
+    grepped for. It now subclasses the shared hierarchy, so `isinstance(exc, AdapterError)`
+    classifies it alongside the failures the other four adapters raise -- which were bare
+    RuntimeError and ValueError, ungreppable and indistinguishable from a crash.
+    """
 
 
 class GhTrendingAdapter(Adapter):
@@ -50,7 +57,7 @@ class GhTrendingAdapter(Adapter):
             # GitHub serves a 403 with an HTML body to clients it dislikes. That body parses
             # perfectly well and yields zero rows, so without this check a block would look
             # exactly like a quiet day.
-            raise GitHubTrendingError(
+            raise SourceBlockedError(
                 f"{source.name}: {source.url} returned 403 -- GitHub is blocking this "
                 f"client. Check the User-Agent (DIGEST_USER_AGENT) and back off; do not "
                 f"retry in a tight loop."
