@@ -286,12 +286,47 @@ def resolve_config_dir(config_dir: Path | None = None) -> Path:
     return (config_dir or Path.cwd()).expanduser().resolve()
 
 
+#: Placeholders in a source URL that this module resolves from the interest profile.
+#:
+#: Derive rather than reconcile. HN's points floor was stated twice -- `points>100` in a URL
+#: and `min_hn_points: 100` in the profile -- with a comment as the only thing tying them
+#: together, and it failed asymmetrically: raising `min_hn_points` worked, lowering it changed
+#: nothing, because the server-side filter still cut at the old value and those stories never
+#: entered the database at all. Asserting equality would have caught the drift; deriving means
+#: there is no second value to drift.
+#:
+#: Resolved here, at config load, because that is the only place both files are in hand.
+#: `{since_ts}` shares the syntax but is resolved per request in `adapters/hn.py`, and
+#: `build_request` refuses to ship any surviving `{...}` to the source.
+PROFILE_PLACEHOLDERS: dict[str, str] = {"{min_points}": "min_hn_points"}
+
+
+def _resolve_profile_placeholders(
+    sources: SourcesConfig, interests: InterestProfile
+) -> SourcesConfig:
+    """Substitute profile-derived values into source URLs. Leaves other placeholders alone."""
+    resolved = []
+    for source in sources.sources:
+        url = source.url
+        if url is not None:
+            for placeholder, field in PROFILE_PLACEHOLDERS.items():
+                if placeholder in url:
+                    url = url.replace(placeholder, str(getattr(interests.hard_rules, field)))
+        resolved.append(source if url == source.url else source.model_copy(update={"url": url}))
+    return SourcesConfig(sources=resolved)
+
+
 def load_config(config_dir: Path | None = None, *, known_kinds: frozenset[str]) -> Config:
     """Both config files. See `load_sources` for why `known_kinds` is injected and required."""
     resolved = resolve_config_dir(config_dir)
+    # sources first, interests second: that is the order errors were reported in before
+    # placeholder resolution needed both, and reversing it would change which of two
+    # broken files a reader is told about first.
+    sources = load_sources(resolved, known_kinds=known_kinds)
+    interests = load_interests(resolved)
     return Config(
-        sources=load_sources(resolved, known_kinds=known_kinds),
-        interests=load_interests(resolved),
+        sources=_resolve_profile_placeholders(sources, interests),
+        interests=interests,
         config_dir=resolved,
     )
 

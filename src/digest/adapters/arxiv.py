@@ -6,12 +6,12 @@ entries, cs.CL 115, cs.MA 16 -- five times the ~50/day the plan assumed.
 
 import asyncio
 import re
-from datetime import UTC, datetime
 
 import feedparser
 import httpx
 from feedparser.util import FeedParserDict
 
+from digest.adapters._mapping import normalise_title, published_at_from_entry
 from digest.adapters.base import Adapter
 from digest.config import Feed, Source
 from digest.errors import SourcePayloadError, unmappable_entry
@@ -34,8 +34,6 @@ KEPT_ANNOUNCE_TYPES = frozenset({"new", "cross"})
 #: it in the title, so the strip stays as a guard, tested against a synthetic entry. It is
 #: not a hazard present in today's data, and saying otherwise would be inventing one.
 _ARXIV_TITLE_PREFIX = re.compile(r"^\s*arXiv:\s*\d{4}\.\d{4,5}(v\d+)?\s*(\[[^\]]*\])?\s*[:\-]?\s*")
-
-_WHITESPACE = re.compile(r"\s+")
 
 #: Per-feed budget. The outer 20s in fetch.py covers the whole source; without this, one slow
 #: category could spend it all and cost the other two.
@@ -98,8 +96,6 @@ class ArxivAdapter(Adapter):
             )
 
         items = _round_robin(per_feed)
-        if source.fetch_limit is not None:
-            items = items[: source.fetch_limit]
         return items
 
     async def _fetch_feed(
@@ -158,7 +154,7 @@ def _round_robin(per_feed: list[list[Item]]) -> list[Item]:
 
 def clean_title(title: str) -> str:
     """Strip the (currently absent) `arXiv:ID` prefix and normalise whitespace."""
-    return _WHITESPACE.sub(" ", _ARXIV_TITLE_PREFIX.sub("", title)).strip()
+    return normalise_title(_ARXIV_TITLE_PREFIX.sub("", title))
 
 
 def _item_from_entry(entry: FeedParserDict, source_name: str, feed_name: str) -> Item | None:
@@ -176,7 +172,7 @@ def _item_from_entry(entry: FeedParserDict, source_name: str, feed_name: str) ->
             title=clean_title(title),
             source=source_name,
             author=entry.get("author"),
-            published_at=_published_at(entry),
+            published_at=published_at_from_entry(entry),
             # The abstract stays in `summary` here, untouched. CLAUDE.md forbids fetching or
             # summarising bodies; keeping the one the feed already gave us costs nothing and
             # is what phase 4 will re-score against.
@@ -187,11 +183,3 @@ def _item_from_entry(entry: FeedParserDict, source_name: str, feed_name: str) ->
     # actually escaped first, naming nothing.
     except ValueError as exc:
         raise unmappable_entry(source_name, feed_name, link, exc) from exc
-
-
-def _published_at(entry: FeedParserDict) -> datetime | None:
-    """feedparser hands back a naive struct_time in UTC; Item rejects naive values."""
-    parsed = entry.get("published_parsed") or entry.get("updated_parsed")
-    if parsed is None:
-        return None
-    return datetime(*parsed[:6], tzinfo=UTC)

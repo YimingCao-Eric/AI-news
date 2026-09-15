@@ -16,6 +16,7 @@ import re
 import httpx
 from selectolax.parser import HTMLParser, Node
 
+from digest.adapters._mapping import normalise_title
 from digest.adapters.base import Adapter
 from digest.config import Source
 from digest.errors import SourceBlockedError, SourcePayloadError
@@ -32,7 +33,6 @@ SELECTOR_STARS_TODAY = "span.d-inline-block.float-sm-right"
 GITHUB_BASE = "https://github.com"
 
 _STARS_TODAY = re.compile(r"([\d,]+)\s+stars?\s+today")
-_WHITESPACE = re.compile(r"\s+")
 
 
 class GitHubTrendingError(SourcePayloadError):
@@ -65,8 +65,6 @@ class GhTrendingAdapter(Adapter):
         response.raise_for_status()
 
         items = parse_trending(response.text, source.name, source.url)
-        if source.fetch_limit is not None:
-            items = items[: source.fetch_limit]
         return items
 
 
@@ -135,7 +133,7 @@ def _item_from_row(row: Node, source_name: str) -> Item | None:
 def _text(node: Node | None) -> str:
     if node is None:
         return ""
-    return _WHITESPACE.sub(" ", node.text(strip=True)).strip()
+    return normalise_title(node.text(strip=True))
 
 
 def _stars_today(row: Node) -> int | None:

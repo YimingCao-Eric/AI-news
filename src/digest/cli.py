@@ -87,7 +87,7 @@ def _run_fetch(config: Config, args: argparse.Namespace) -> int:
     print()
 
     if args.dry_run:
-        print(f"fetched {len(result.items)}, new -, dupes -  (--dry-run: nothing written)")
+        print(f"fetched {len(result.items)}, inserted -, dupes -  (--dry-run: nothing written)")
         for outcome in result.outcomes:
             _log_source_line(outcome, result, fetched=_count_for(result.items, outcome.name))
         return _exit_code_for(result)
@@ -101,7 +101,7 @@ def _run_fetch(config: Config, args: argparse.Namespace) -> int:
         # `run_started_at` across every batch keeps "this run" exactly queryable.
         for outcome in result.outcomes:
             source_items = [i for i in result.items if i.source == outcome.name]
-            new = store.upsert_items(conn, source_items, now=run_started_at)
+            new = store.insert_items(conn, source_items, now=run_started_at)
             dupes = store.count_dupes(conn, run_started_at, source=outcome.name)
             total_new += new
             total_dupes += dupes
@@ -115,7 +115,7 @@ def _run_fetch(config: Config, args: argparse.Namespace) -> int:
             )
             _log_source_line(outcome, result, fetched=len(source_items), new=new, dupes=dupes)
 
-        print(f"fetched {len(result.items)}, new {total_new}, dupes {total_dupes}")
+        print(f"fetched {len(result.items)}, inserted {total_new}, dupes {total_dupes}")
         print()
         # Read back rather than reusing the in-memory records: the persisted counter is the
         # one that knows a source has been failing for three days.
@@ -144,20 +144,20 @@ def _run_render(config: Config, args: argparse.Namespace) -> int:
     # the success printing the same thing.
     conn = store.init_db(_db_path(args), create=False)
     try:
-        items = store.new_items(conn)
+        items = store.unrendered_items(conn)
         health = store.get_source_health(conn)
     finally:
         conn.close()
 
     if not items:
-        print("Nothing new. Run `digest fetch` first.")
+        print("Nothing waiting for a digest. Run `digest fetch` first.")
         return EXIT_OK
 
     by_source: dict[str, list[Item]] = {}
     for item in items:
         by_source.setdefault(item.source, []).append(item)
 
-    print(f"{len(items)} new item(s) across {len(by_source)} source(s)\n")
+    print(f"{len(items)} item(s) not yet in a digest, across {len(by_source)} source(s)\n")
     for source_name, source_items in by_source.items():
         print(f"## {source_name} ({len(source_items)})")
         for item in source_items:
@@ -167,7 +167,7 @@ def _run_render(config: Config, args: argparse.Namespace) -> int:
         print()
 
     print(_health_summary(items, health, enabled={s.name for s in config.sources.enabled}))
-    print("\n(digest_date is not stamped until phase 3c, so these stay 'new'.)")
+    print("\n(digest_date is not stamped until phase 3c, so these stay unrendered.)")
     return EXIT_OK
 
 
@@ -201,7 +201,11 @@ def _log_source_line(
     new: int | None = None,
     dupes: int | None = None,
 ) -> None:
-    """CLAUDE.md: one line per source per run -- name, fetched, new, duration, ok/failed.
+    """CLAUDE.md: one line per source -- name, fetched, inserted, duration, ok/failed.
+
+    `inserted`, not `new`: "new" also names the items `digest render` shows, which are
+    the ones never rendered rather than the ones written this run. The two numbers
+    routinely disagree and both are right.
 
     Emitted here rather than in fetch.py because the "new" count only exists once the store
     has written, and fetch.py may not touch the store. The duration travels over on
@@ -212,7 +216,7 @@ def _log_source_line(
     # failure this theme is removing.
     duration = result.durations[outcome.name]
     log.info(
-        "source=%s fetched=%d new=%s dupes=%s duration=%.2fs status=%s",
+        "source=%s fetched=%d inserted=%s dupes=%s duration=%.2fs status=%s",
         outcome.name,
         fetched,
         "-" if new is None else new,

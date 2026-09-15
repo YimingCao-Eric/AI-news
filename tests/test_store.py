@@ -18,14 +18,14 @@ from digest.store import (
     from_iso,
     get_source_health,
     init_db,
+    insert_items,
     is_near_duplicate,
-    new_items,
     record_source_health,
     stamp_digest_date,
     title_similarity,
     titles_are_near_duplicates,
     to_iso,
-    upsert_items,
+    unrendered_items,
     url_hash,
 )
 from tests.conftest import fixture_text
@@ -142,8 +142,8 @@ def test_datetime_round_trip_preserves_the_instant(conn):
     kolkata = timezone(timedelta(hours=5, minutes=30))
     published = datetime(2026, 9, 12, 14, 0, tzinfo=kolkata)
 
-    upsert_items(conn, [make_item(published_at=published)])
-    (stored,) = new_items(conn)
+    insert_items(conn, [make_item(published_at=published)])
+    (stored,) = unrendered_items(conn)
 
     assert stored.published_at is not None
     assert stored.published_at.tzinfo is not None
@@ -155,7 +155,7 @@ def test_datetime_round_trip_preserves_the_instant(conn):
 
 def test_no_datetime_object_reaches_sqlite(conn):
     """Python 3.12 deprecates the default adapter; we convert at the boundary instead."""
-    upsert_items(conn, [make_item()])
+    insert_items(conn, [make_item()])
     value = conn.execute("SELECT published_at FROM items").fetchone()["published_at"]
     assert isinstance(value, str)
     assert value.endswith("+00:00")
@@ -204,7 +204,7 @@ def test_checkpoint_leaves_the_wal_empty(tmp_path):
     """Phase 5 depends on this: a committed .db with a non-empty -wal is silently behind."""
     path = tmp_path / "wal.db"
     conn = init_db(path)
-    upsert_items(conn, [make_item()])
+    insert_items(conn, [make_item()])
 
     wal = path.with_name(path.name + "-wal")
     assert wal.exists() and wal.stat().st_size > 0, "expected WAL mode to be active"
@@ -231,19 +231,19 @@ def test_sources_table_has_no_enabled_column(conn):
 
 def test_second_insert_of_the_same_url_adds_nothing(conn):
     items = [make_item(), make_item(url="https://example.com/b", title="Another thing")]
-    assert upsert_items(conn, items) == 2
-    assert upsert_items(conn, items) == 0
+    assert insert_items(conn, items) == 2
+    assert insert_items(conn, items) == 0
     assert conn.execute("SELECT COUNT(*) AS n FROM items").fetchone()["n"] == 2
 
 
 def test_urls_differing_only_by_tracking_collapse(conn):
-    assert upsert_items(conn, [make_item(url="https://example.com/a")]) == 1
-    assert upsert_items(conn, [make_item(url="https://www.example.com/a/?utm_source=hn")]) == 0
+    assert insert_items(conn, [make_item(url="https://example.com/a")]) == 1
+    assert insert_items(conn, [make_item(url="https://www.example.com/a/?utm_source=hn")]) == 0
 
 
 def test_raw_json_is_the_source_payload_not_the_item(conn):
     """`raw` is the original payload; Item's other fields are already columns."""
-    upsert_items(conn, [make_item(raw={"objectID": "42", "points": 300, "nested": {"a": 1}})])
+    insert_items(conn, [make_item(raw={"objectID": "42", "points": 300, "nested": {"a": 1}})])
     stored = json.loads(conn.execute("SELECT raw_json FROM items").fetchone()["raw_json"])
 
     assert stored == {"objectID": "42", "points": 300, "nested": {"a": 1}}
@@ -253,7 +253,7 @@ def test_raw_json_is_the_source_payload_not_the_item(conn):
 
 def test_first_seen_at_is_one_timestamp_for_the_whole_batch(conn):
     """One run means one timestamp, or the dupe count scoped to it is fuzzy."""
-    upsert_items(conn, [make_item(url=f"https://example.com/{i}", title=f"T{i}") for i in range(5)])
+    insert_items(conn, [make_item(url=f"https://example.com/{i}", title=f"T{i}") for i in range(5)])
     stamps = {row["first_seen_at"] for row in conn.execute("SELECT first_seen_at FROM items")}
     assert len(stamps) == 1
 
@@ -335,8 +335,8 @@ def test_near_duplicates_are_stored_and_flagged_not_dropped(conn):
     first = make_item(url="https://one.example/a", title=TITLE_A)
     second = make_item(url="https://two.example/b", title=TITLE_B, source="ai_blogs")
 
-    assert upsert_items(conn, [first]) == 1
-    assert upsert_items(conn, [second]) == 1  # stored, not dropped
+    assert insert_items(conn, [first]) == 1
+    assert insert_items(conn, [second]) == 1  # stored, not dropped
 
     rows = {row["url"]: row["dupe_of"] for row in conn.execute("SELECT url, dupe_of FROM items")}
     assert rows["https://one.example/a"] is None
@@ -345,7 +345,7 @@ def test_near_duplicates_are_stored_and_flagged_not_dropped(conn):
 
 def test_near_duplicate_respects_the_window(conn):
     old = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
-    upsert_items(conn, [make_item(url="https://one.example/a", title=TITLE_A)], now=old)
+    insert_items(conn, [make_item(url="https://one.example/a", title=TITLE_A)], now=old)
 
     later = old + timedelta(days=10)
     candidate = make_item(url="https://two.example/b", title=TITLE_B)
@@ -355,9 +355,9 @@ def test_near_duplicate_respects_the_window(conn):
 
 def test_dupe_chains_point_at_the_original(conn):
     """A third copy references the first, not the second."""
-    upsert_items(conn, [make_item(url="https://one.example/a", title=TITLE_A)])
-    upsert_items(conn, [make_item(url="https://two.example/b", title=TITLE_B)])
-    upsert_items(conn, [make_item(url="https://three.example/c", title=TITLE_C)])
+    insert_items(conn, [make_item(url="https://one.example/a", title=TITLE_A)])
+    insert_items(conn, [make_item(url="https://two.example/b", title=TITLE_B)])
+    insert_items(conn, [make_item(url="https://three.example/c", title=TITLE_C)])
 
     rows = {row["url"]: row["dupe_of"] for row in conn.execute("SELECT url, dupe_of FROM items")}
     assert rows["https://three.example/c"] == url_hash("https://one.example/a")
@@ -367,8 +367,8 @@ def test_count_dupes_is_scoped_to_the_run(conn):
     monday = datetime(2026, 9, 14, 14, 0, tzinfo=UTC)
     tuesday = monday + timedelta(days=1)
 
-    upsert_items(conn, [make_item(url="https://one.example/a", title=TITLE_A)], now=monday)
-    upsert_items(conn, [make_item(url="https://two.example/b", title=TITLE_B)], now=tuesday)
+    insert_items(conn, [make_item(url="https://one.example/a", title=TITLE_A)], now=monday)
+    insert_items(conn, [make_item(url="https://two.example/b", title=TITLE_B)], now=tuesday)
 
     assert count_dupes(conn, monday) == 0
     assert count_dupes(conn, tuesday) == 1
@@ -377,16 +377,16 @@ def test_count_dupes_is_scoped_to_the_run(conn):
 # ------------------------------------------------------------------ what "new" means
 
 
-def test_new_items_are_those_never_rendered(conn):
-    upsert_items(conn, [make_item(url="https://example.com/a", title="First")])
-    assert len(new_items(conn)) == 1
+def test_unrendered_items_are_those_never_rendered(conn):
+    insert_items(conn, [make_item(url="https://example.com/a", title="First")])
+    assert len(unrendered_items(conn)) == 1
 
     stamp_digest_date(conn, ["https://example.com/a"], "2026-09-14")
-    assert new_items(conn) == []
+    assert unrendered_items(conn) == []
 
 
 def test_stamping_is_idempotent(conn):
-    upsert_items(conn, [make_item()])
+    insert_items(conn, [make_item()])
     assert stamp_digest_date(conn, ["https://example.com/a"], "2026-09-14") == 1
     assert stamp_digest_date(conn, ["https://example.com/a"], "2026-09-15") == 0
 
@@ -402,30 +402,30 @@ def test_a_missed_run_catches_up_instead_of_losing_a_day(conn):
     tuesday = monday + timedelta(days=1)
     wednesday = monday + timedelta(days=2)
 
-    upsert_items(conn, [make_item(url="https://example.com/mon", title="Monday story")], now=monday)
+    insert_items(conn, [make_item(url="https://example.com/mon", title="Monday story")], now=monday)
     stamp_digest_date(conn, ["https://example.com/mon"], "2026-09-14")
 
     # Tuesday: fetched, but no digest was produced.
-    upsert_items(
+    insert_items(
         conn, [make_item(url="https://example.com/tue", title="Tuesday story")], now=tuesday
     )
-    upsert_items(
+    insert_items(
         conn, [make_item(url="https://example.com/wed", title="Wednesday story")], now=wednesday
     )
 
-    titles = [item.title for item in new_items(conn)]
+    titles = [item.title for item in unrendered_items(conn)]
     assert titles == ["Tuesday story", "Wednesday story"]
 
 
-def test_new_items_are_ordered_oldest_first(conn):
+def test_unrendered_items_are_ordered_oldest_first(conn):
     early = datetime(2026, 9, 14, 6, 0, tzinfo=UTC)
     for offset, name in enumerate(["c", "a", "b"]):
-        upsert_items(
+        insert_items(
             conn,
             [make_item(url=f"https://example.com/{name}", title=name)],
             now=early + timedelta(hours=offset),
         )
-    assert [item.title for item in new_items(conn)] == ["c", "a", "b"]
+    assert [item.title for item in unrendered_items(conn)] == ["c", "a", "b"]
 
 
 # --------------------------------------------------------------------------- source health

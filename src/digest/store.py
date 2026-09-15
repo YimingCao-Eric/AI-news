@@ -379,13 +379,25 @@ def is_near_duplicate(
     return None
 
 
-def upsert_items(
+def insert_items(
     conn: sqlite3.Connection,
     items: Sequence[Item],
     now: datetime | None = None,
     window_days: int = 3,
 ) -> int:
-    """Insert items that are not already stored. Returns the count of genuinely new rows.
+    """Insert items that are not already stored. Returns the count of rows actually inserted.
+
+    Named `insert_items` and not `upsert_items`, which is what it was called while being
+    `INSERT OR IGNORE`: an upsert *updates* the existing row, and this discards the incoming
+    one. The name promised the opposite of the behaviour, and the payload was timed for phase
+    3b -- `score`, `topic` and `summary` are already parameters here, so the obvious call for
+    writing a ranker's output back would have returned 0 and written nothing, indistinguishable
+    from a normal second run.
+
+    Not `insert_new_items` either: "new" already means "not yet rendered" three lines away in
+    the CLI's output, and reusing it here would reintroduce the collision one rename removed.
+
+    The write-back path phase 3b needs is deliberately NOT here. That is 3b's design decision.
 
     Every item in the batch gets the *same* `first_seen_at`, so "this run" is exactly
     queryable afterwards -- which is what `count_dupes` relies on, and what makes the
@@ -451,8 +463,13 @@ def _row_to_item(row: sqlite3.Row) -> Item:
     )
 
 
-def new_items(conn: sqlite3.Connection) -> list[Item]:
+def unrendered_items(conn: sqlite3.Connection) -> list[Item]:
     """Items that have never appeared in a digest, oldest first.
+
+    Named for what it means rather than "new", which meant two different things in
+    adjacent user-visible output: the run log's count of rows *inserted this run*, and
+    this, *not yet rendered*. Run `digest fetch` twice then `digest render` and the two
+    numbers disagree completely while both are correct.
 
     "New" is `digest_date IS NULL` -- deliberately NOT "first_seen_at is today". Two reasons,
     both of which will happen:

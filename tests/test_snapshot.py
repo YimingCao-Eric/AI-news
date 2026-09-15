@@ -116,7 +116,7 @@ def test_the_clock_follows_the_manifest_not_a_constant(tmp_path, monkeypatch):
     design R0 rejected, which is worse than no test: someone simplifying the indirection away
     would have got a green suite.
 
-    What the indirection is for: `ai_blogs` filters against `now - MAX_ENTRY_AGE_DAYS`, so a
+    What the indirection is for: `ai_blogs` filters against `now - INGEST_MAX_AGE_DAYS`, so a
     constant frozen at one date pushes every entry outside the cutoff the moment fixtures are
     re-recorded -- yielding a snapshot of nothing, produced by a test that still passes.
     Reading `captured_at` means re-recording moves the clock as a side effect.

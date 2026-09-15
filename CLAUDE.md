@@ -102,7 +102,10 @@ are the only thing standing between this and a 07:00 failure on the laptop.
 - Console output goes through `cli._force_utf8_output()` for the same reason.
 - All timestamps stored as ISO8601 UTC strings.
 - Every module gets a `--dry-run`-able CLI path where it makes sense.
-- Log one line per source per run: name, items fetched, new items, duration, ok/failed.
+- Log one line per source per run: name, items fetched, items **inserted**, duration,
+  ok/failed. Not "new": that word also names what `digest render` shows, which is items
+  never rendered rather than items written this run. The two counts routinely disagree
+  and both are correct, so they must not share a word in output.
 - Type hints everywhere; run `ruff` before declaring done.
 - Where a guard exists to prevent a specific failure, write a test that proves the guard is
 **load-bearing** — one that demonstrates the failure the guard prevents, not just that the

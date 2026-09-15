@@ -1,7 +1,7 @@
 """Run the whole pipeline over recorded fixtures and dump the result deterministically.
 
 fetch -> normalise -> store, with the real `fetch_all`, the real `init_db`, the real
-`upsert_items`. Not the adapters in isolation: the point is the *composition*, which is what
+`insert_items`. Not the adapters in isolation: the point is the *composition*, which is what
 the unit tests do not cover.
 
 Byte-identical across runs and across machines. Everything that could vary is either pinned
@@ -34,10 +34,10 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest import mock
 from urllib.parse import urlsplit
 
 import httpx
-import pytest
 
 from digest import store
 from digest.adapters.ai_blogs import AIBlogsAdapter
@@ -133,10 +133,13 @@ def offline(config: Config, now: datetime) -> Iterator[None]:
     real_client = httpx.AsyncClient
     transport = httpx.MockTransport(_handler(routes))
 
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(
-            httpx, "AsyncClient", lambda **kw: real_client(**{**kw, "transport": transport})
-        )
+    # stdlib `mock`, not `pytest.MonkeyPatch`: this is a script, and phase 5 CI may run
+    # `uv sync` without dev extras. A script importing a dev-only test library breaks there
+    # while passing locally -- and `tests/` imports this module, so the failure would look
+    # like a test problem rather than a packaging one.
+    with mock.patch.object(
+        httpx, "AsyncClient", lambda **kw: real_client(**{**kw, "transport": transport})
+    ):
         yield
 
 
@@ -183,7 +186,7 @@ def generate(config: Config | None = None) -> str:
     with tempfile.TemporaryDirectory() as tmp:
         conn = store.init_db(Path(tmp) / "snapshot.db")
         try:
-            store.upsert_items(conn, result.items, now=now)
+            store.insert_items(conn, result.items, now=now)
             rows = conn.execute(
                 "SELECT url_hash, url, title, source, published_at, dupe_of, raw_json "
                 "FROM items ORDER BY url_hash"

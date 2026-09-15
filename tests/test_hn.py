@@ -49,7 +49,7 @@ import httpx
 import pytest
 
 from digest.adapters.base import Adapter
-from digest.adapters.hn import LOOKBACK_HOURS, HNAdapter, build_request
+from digest.adapters.hn import REQUEST_WINDOW_HOURS, HNAdapter, build_request
 from digest.cli import main
 from digest.config import Config, Source
 from digest.fetch import DEFAULT_USER_AGENT, fetch_all, user_agent
@@ -101,7 +101,7 @@ def test_since_ts_is_48h_back_not_24h(hn_source):
 
     assert actual == now - timedelta(hours=48)
     assert actual != now - timedelta(hours=24), "regressed to a 24h window"
-    assert LOOKBACK_HOURS == 48
+    assert REQUEST_WINDOW_HOURS == 48
 
 
 def test_points_threshold_survives_substitution(hn_source):
@@ -348,7 +348,7 @@ def test_cli_fetch_prints_items_and_health_footer(monkeypatch, capsys, tmp_path)
     out = capsys.readouterr().out
     lines = out.splitlines()
     assert len(STORIES["hits"]) == sum(line.startswith("[hn] ") for line in lines)
-    assert f"fetched {len(STORIES['hits'])}, new {len(STORIES['hits'])}, dupes 0" in out
+    assert f"fetched {len(STORIES['hits'])}, inserted {len(STORIES['hits'])}, dupes 0" in out
     assert "hn" in out and "ok" in out
 
 

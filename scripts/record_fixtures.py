@@ -22,6 +22,10 @@ from pathlib import Path
 import httpx
 import yaml
 
+from digest.adapters.hn import build_request
+from digest.config import load_config
+from digest.fetch import KNOWN_KINDS
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = REPO_ROOT / "tests" / "fixtures"
 SOURCES_YAML = REPO_ROOT / "sources.yaml"
@@ -72,15 +76,23 @@ def _configured(source_name: str) -> dict:
 
 
 def record_hn(client: httpx.Client) -> None:
-    """Two fixtures: the story window, and an Ask HN page for the missing-url fallback."""
-    from datetime import timedelta
+    """Two fixtures: the story window, and an Ask HN page for the missing-url fallback.
 
-    since = int((datetime.now(tz=UTC) - timedelta(hours=48)).timestamp())
-    response = _get(
-        client,
-        "https://hn.algolia.com/api/v1/search_by_date"
-        f"?tags=story&numericFilters=points>100,created_at_i>{since}&hitsPerPage=30",
-    )
+    The story request is built by the adapter's own `build_request` against the loaded
+    config, not hand-written here. It used to be a literal URL duplicating sources.yaml --
+    the points floor, the 48h window and the page size all restated -- so changing any of
+    them in config left the recorder capturing a window production no longer uses, and the
+    snapshot would have been built from fixtures that did not match the pipeline.
+
+    Routing through `build_request` also puts the recorder behind the guard that refuses to
+    ship an unresolved `{...}`: `{min_points}` is resolved at config load and `{since_ts}` per
+    request, so a recorder reading raw YAML would have sent Algolia a literal brace and the
+    next refresh would have captured a wrong or empty fixture, weeks before anyone noticed.
+    """
+    source = load_config(REPO_ROOT, known_kinds=KNOWN_KINDS).sources.by_name("hn")
+    base_url, params = build_request(source, now=datetime.now(tz=UTC))
+    request = httpx.Request("GET", base_url, params=params)
+    response = _get(client, str(request.url))
     _write("hn_search_by_date.json", json.dumps(response.json(), indent=2, ensure_ascii=False))
 
     # Text posts are the only hits with no `url` key, and a points-filtered story window

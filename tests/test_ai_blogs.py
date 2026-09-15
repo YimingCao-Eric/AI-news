@@ -16,7 +16,7 @@ import httpx
 import pytest
 
 from digest.adapters.ai_blogs import (
-    MAX_ENTRY_AGE_DAYS,
+    INGEST_MAX_AGE_DAYS,
     AIBlogsAdapter,
     conditional_headers,
     is_stale,
@@ -130,7 +130,7 @@ def test_entries_older_than_the_cutoff_are_dropped(source):
 
     body = (
         '<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>'
-        + "".join(entry(f"old{i}", MAX_ENTRY_AGE_DAYS + 10 + i) for i in range(3))
+        + "".join(entry(f"old{i}", INGEST_MAX_AGE_DAYS + 10 + i) for i in range(3))
         + entry("fresh", 0)
         + "</channel></rss>"
     )
@@ -300,7 +300,7 @@ def test_one_quiet_feed_is_not_an_error(source, bodies):
 # -------------------------------------------------------------------------- conditional
 
 
-def test_304_is_no_new_items_not_an_error(source, bodies):
+def test_304_is_no_unrendered_items_not_an_error(source, bodies):
     not_modified = {**bodies, source.feeds[1].url: httpx.Response(304)}
     items, notes = fetch(source, not_modified)
 

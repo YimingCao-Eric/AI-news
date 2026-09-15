@@ -94,6 +94,28 @@ def user_agent() -> str:
     return os.environ.get("DIGEST_USER_AGENT") or DEFAULT_USER_AGENT
 
 
+def _apply_fetch_limit(items: list[Item], source: Source) -> list[Item]:
+    """Enforce `fetch_limit` once, here, for every adapter.
+
+    `fetch_limit` means a **post-condition** on what a source contributes -- sources.yaml
+    calls it "max items to pull and store per run" -- so it is enforced where every adapter's
+    output passes, and an adapter cannot violate it even by accident.
+
+    It was previously four identical slices in four adapters, and in `hn` it was not a slice
+    at all: `hn` set Algolia's `hitsPerPage` and trusted the server. That is a *request hint*
+    doing a *guarantee's* job -- drop the parameter in a URL edit, or meet a server that
+    ignores it, and `hn` silently exceeds its configured limit while the other four
+    structurally cannot. `hn` still sends `hitsPerPage` as the optimisation it always was
+    (do not download a thousand to keep thirty); the guarantee now lives here.
+
+    Order is preserved, so arXiv's round-robin interleave still decides *which* items a
+    binding cap keeps -- fairly across categories rather than alphabetically.
+    """
+    if source.fetch_limit is None:
+        return items
+    return items[: source.fetch_limit]
+
+
 async def _fetch_one(
     client: httpx.AsyncClient, source: Source, adapter: Adapter | None
 ) -> tuple[list[Item], SourceOutcome, float, list[str]]:
@@ -116,6 +138,7 @@ async def _fetch_one(
             )
         async with asyncio.timeout(SOURCE_TIMEOUT_SECONDS):
             items = await adapter.fetch(client, source)
+        items = _apply_fetch_limit(items, source)
     # Deliberately broad, and deliberately NOT narrowed to AdapterError: CLAUDE.md requires
     # that no source can abort the run, so anything an adapter can raise -- including bugs in
     # the adapter itself -- has to be contained. Narrowing to the named base would let an

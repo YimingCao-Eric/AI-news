@@ -87,11 +87,6 @@ def test_published_at_is_none_not_now(source):
     assert all(item.published_at is None for item in fetch(source))
 
 
-def test_fetch_limit_is_applied(source):
-    capped = source.model_copy(update={"fetch_limit": 3})
-    assert len(fetch(capped)) == 3
-
-
 # ------------------------------------------------------- failing loudly, which is the point
 
 

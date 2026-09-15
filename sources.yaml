@@ -20,7 +20,16 @@ sources:
     kind: hn
     # search_by_date, not tags=front_page: this job runs once a day at 07:00, and a
     # front-page snapshot misses anything that peaked at 03:00 and rolled off. The points
-    # floor matches interests.yaml hard_rules.min_hn_points.
+    # {min_points} is resolved AT CONFIG LOAD from interests.yaml hard_rules.min_hn_points,
+    # so the floor is stated once. It used to be the literal 100 here and 100 there with a
+    # comment as the only reconciliation: lowering min_hn_points would have changed nothing,
+    # because the server-side filter still cut at 100 and those stories never arrived.
+    #
+    # The two placeholders resolve at DIFFERENT STAGES despite sharing a syntax:
+    #   {min_points}  config load  -- from the interest profile, before any request
+    #   {since_ts}    fetch time   -- from the clock, per request (adapters/hn.py)
+    # Either one surviving unresolved is caught by hn.build_request, which refuses to ship
+    # a literal brace to Algolia.
     # {since_ts} is a unix timestamp the adapter computes at fetch time: now - 48h
     # (adapters/hn.py LOOKBACK_HOURS). Not 24h -- a story posted 30h ago that only crosses
     # 100 points this morning was never inside a 24h window on either run, so slow burners
@@ -29,7 +38,7 @@ sources:
     # the window to a different param here needs no code change.
     # Fallback if the date search ever disappoints:
     #   https://hn.algolia.com/api/v1/search?tags=front_page
-    url: "https://hn.algolia.com/api/v1/search_by_date?tags=story&numericFilters=points>100,created_at_i>{since_ts}"
+    url: "https://hn.algolia.com/api/v1/search_by_date?tags=story&numericFilters=points>{min_points},created_at_i>{since_ts}"
     weight: 1.0
     fetch_limit: 30
     enabled: true

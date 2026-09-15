@@ -5,20 +5,18 @@ rather than the raw model or paper firehose. That curation is the whole reason t
 outranks arXiv when the same paper appears in both (see `tests/test_cross_source_dupes.py`).
 """
 
-import re
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 import httpx
 
+from digest.adapters._mapping import normalise_title, parse_iso_utc
 from digest.adapters.base import Adapter
 from digest.config import Source
 from digest.errors import SourcePayloadError, unmappable_entry
 from digest.models import Item
 
 PAPER_URL = "https://huggingface.co/papers/{paper_id}"
-
-_WHITESPACE = re.compile(r"\s+")
 
 
 class HFPapersAdapter(Adapter):
@@ -48,8 +46,6 @@ class HFPapersAdapter(Adapter):
             )
 
         items = [item for entry in payload if (item := _item_from_entry(entry, source.name))]
-        if source.fetch_limit is not None:
-            items = items[: source.fetch_limit]
         return items
 
 
@@ -64,7 +60,7 @@ def _item_from_entry(entry: dict[str, Any], source_name: str) -> Item | None:
     try:
         return Item(
             url=url,
-            title=_WHITESPACE.sub(" ", title).strip(),
+            title=normalise_title(title),
             source=source_name,
             author=_submitter(entry),
             published_at=_published_at(entry),
@@ -90,13 +86,14 @@ def _submitter(entry: dict[str, Any]) -> str | None:
 
 
 def _published_at(entry: dict[str, Any]) -> datetime | None:
-    """`publishedAt` is ISO with a `Z`; models.Item rejects naive values, so convert here."""
+    """`publishedAt` first, `submittedOnDailyAt` as a fallback.
+
+    The fallback is for an *absent* field, not a malformed one: the first key that is present
+    is the one that must parse, so a shape change is reported rather than silently skipped
+    past to the second-best field.
+    """
     for key in ("publishedAt", "submittedOnDailyAt"):
         value = entry.get(key)
         if isinstance(value, str) and value:
-            try:
-                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            except ValueError:
-                continue
-            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+            return parse_iso_utc(value)
     return None

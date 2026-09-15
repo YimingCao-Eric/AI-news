@@ -125,7 +125,10 @@ def test_the_per_source_line_appears_without_v(monkeypatch, tmp_path, caplog):
 
     lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("source=")]
     assert lines, "the mandated per-source line was not emitted"
-    assert "fetched=" in lines[0] and "new=" in lines[0] and "duration=" in lines[0]
+    assert "fetched=" in lines[0]
+    assert "inserted=" in lines[0], "the count is `inserted`, never `new` -- see VN-1"
+    assert "new=" not in lines[0]
+    assert "duration=" in lines[0]
 
 
 def test_the_digest_logger_is_raised_but_the_root_is_not(monkeypatch, tmp_path):

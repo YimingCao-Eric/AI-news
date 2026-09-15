@@ -12,7 +12,6 @@ outcome reaches the run summary through `drain_notes`.
 """
 
 import asyncio
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -21,6 +20,7 @@ import feedparser
 import httpx
 from feedparser.util import FeedParserDict
 
+from digest.adapters._mapping import normalise_title, published_at_from_entry
 from digest.adapters.base import Adapter
 from digest.config import Feed, Source
 from digest.errors import SourcePayloadError, unmappable_entry
@@ -41,7 +41,12 @@ FEED_TIMEOUT_SECONDS = 8.0
 #: nobody edits when a feed's rhythm changes.
 DEFAULT_STALENESS_THRESHOLD_DAYS = 30
 
-#: Ingest cutoff. Entries older than this are not stored.
+#: Ingest cutoff: entries older than this are parsed but not stored.
+#:
+#: Named for its stage. `hn.REQUEST_WINDOW_HOURS` acts on the request so old items never
+#: arrive; this acts after parsing because RSS hands you the whole back catalogue whether
+#: you asked or not; `max_age_hours` in interests.yaml acts at selection. Three windows,
+#: three stages, deliberately separable.
 #:
 #: Unlike arXiv, HF papers and GitHub Trending -- all of which publish *today's* list -- these
 #: feeds carry their whole back catalogue. Measured 2026-09-14: openai_news alone serves 1193
@@ -54,9 +59,7 @@ DEFAULT_STALENESS_THRESHOLD_DAYS = 30
 #:
 #: Entries with no parseable date are KEPT. Fail toward the visible error: showing an item
 #: twice is recoverable, dropping one for a missing timestamp is not visible at all.
-MAX_ENTRY_AGE_DAYS = 30
-
-_WHITESPACE = re.compile(r"\s+")
+INGEST_MAX_AGE_DAYS = 30
 
 
 def utc_now() -> datetime:
@@ -87,7 +90,7 @@ class AIBlogsAdapter(Adapter):
     def __init__(self, clock: Callable[[], datetime] = utc_now) -> None:
         """`clock` is injected rather than monkeypatched, and is a *callable*, not a value.
 
-        MAX_ENTRY_AGE_DAYS and the staleness thresholds are both measured against it, so an
+        INGEST_MAX_AGE_DAYS and the staleness thresholds are both measured against it, so an
         offline harness reading fixed fixtures must be able to pin it -- otherwise the same
         recorded feeds yield 112 items today and zero thirty days from now.
 
@@ -142,7 +145,7 @@ class AIBlogsAdapter(Adapter):
             # cleanly and every one was empty. One quiet blog is normal; six at once, with
             # well-formed documents, means the endpoints changed shape rather than that
             # nobody published. Note this counts *entries*, not items -- feeds full of
-            # entries that are all older than MAX_ENTRY_AGE_DAYS are stale, not broken, and
+            # entries that are all older than INGEST_MAX_AGE_DAYS are stale, not broken, and
             # the per-feed STALE notes already say so.
             raise SourcePayloadError(
                 f"{source.name}: all {len(feeds)} feeds parsed cleanly and contained zero "
@@ -150,8 +153,6 @@ class AIBlogsAdapter(Adapter):
                 f"fixtures and check the mapping. Notes: {'; '.join(self._notes)}"
             )
 
-        if source.fetch_limit is not None:
-            items = items[: source.fetch_limit]
         return items
 
     async def _fetch_feed(
@@ -187,7 +188,7 @@ class AIBlogsAdapter(Adapter):
         dated = [item.published_at for item in all_items if item.published_at is not None]
         newest = max(dated) if dated else None
 
-        cutoff = now - timedelta(days=MAX_ENTRY_AGE_DAYS)
+        cutoff = now - timedelta(days=INGEST_MAX_AGE_DAYS)
         recent = [
             item for item in all_items if item.published_at is None or item.published_at >= cutoff
         ]
@@ -263,10 +264,10 @@ def _item_from_entry(entry: FeedParserDict, source_name: str, feed_name: str) ->
     try:
         return Item(
             url=link,
-            title=_WHITESPACE.sub(" ", title).strip(),
+            title=normalise_title(title),
             source=source_name,
             author=entry.get("author"),
-            published_at=_published_at(entry),
+            published_at=published_at_from_entry(entry),
             raw=raw,
         )
     # ValidationError is a ValueError subclass, so this also catches a date string the
@@ -274,11 +275,3 @@ def _item_from_entry(entry: FeedParserDict, source_name: str, feed_name: str) ->
     # actually escaped first, naming nothing.
     except ValueError as exc:
         raise unmappable_entry(source_name, feed_name, link, exc) from exc
-
-
-def _published_at(entry: FeedParserDict) -> datetime | None:
-    """feedparser normalises to a naive UTC struct_time; Item rejects naive datetimes."""
-    parsed = entry.get("published_parsed") or entry.get("updated_parsed")
-    if parsed is None:
-        return None
-    return datetime(*parsed[:6], tzinfo=UTC)

@@ -78,12 +78,6 @@ def test_raw_keeps_the_whole_entry_including_the_long_summary(source):
     assert {"upvotes", "id", "title"} <= items[0].raw["paper"].keys()
 
 
-def test_fetch_limit_is_applied(source):
-    assert source.fetch_limit == 50
-    trimmed = source.model_copy(update={"fetch_limit": 5})
-    assert len(fetch(PAPERS, trimmed)) == 5
-
-
 def test_zero_papers_raises_rather_than_returning_empty(source):
     """CLAUDE.md zero-items rule.
 
