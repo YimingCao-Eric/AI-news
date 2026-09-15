@@ -3,6 +3,15 @@
 54 findings across six dimensions. Every one has a decision below. Themes are ordered; R3 runs them
 in that order and one per session.
 
+**Amended 2026-09-15 — this file records what was decided, not what landed.** Every finding and every
+fix/defer decision below held through implementation, but **five of the prescribed *mechanisms*
+changed** once the code was in hand, each toward something more conservative or more specific: the
+clock injection idiom, `record_source_health`'s signature, what the adapter registry is keyed by, the
+`insert_items` rename, and the scope of the README rewrite. Left uncorrected on purpose, for the same
+reason `docs/PLAN.md` §7's "Done when" lines are: the gap between what was prescribed from the reports
+and what survived contact with the code is the most useful thing this pairing records. **For what
+actually landed, `R0-R3-review.md` in this directory is the record**, and its section 8 names all five.
+
 Shorthand for sources: **SF**=Silent failure, **LC**=Layering, **DUP**=Duplication, **TS**=Test suite,
 **VN**=Vocabulary, **DD**=Documentation drift.
 
