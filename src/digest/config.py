@@ -59,6 +59,19 @@ class Source(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
+    #: Which adapter implementation serves this source -- NOT what the source runs on.
+    #:
+    #: `name` identifies the source, `kind` identifies the implementation. They coincide for
+    #: all five sources today because each implementation serves exactly one source, and that
+    #: redundancy is left visible rather than hidden: the first divergence is a second RSS
+    #: source declaring an existing kind, which is the moment to rename the implementation.
+    #:
+    #: `kind` never encodes *shape*. Whether a source has one endpoint or six is determined
+    #: by field presence (`url` vs `feeds`) and normalised by `endpoints`, exactly as phase 0
+    #: decided -- adapters iterate `source.endpoints` and never ask how many. This field was
+    #: previously a category (`json_api`, `rss`, `html`) that dispatched nothing, and those
+    #: values could not become the dispatch key: `json_api` and `rss` each covered two
+    #: unrelated adapters.
     kind: str
     url: str | None = None
     feeds: list[Feed] | None = None
@@ -213,13 +226,38 @@ def _flatten_hard_rules(raw: dict[str, Any], path: Path) -> dict[str, Any]:
     return {**raw, "hard_rules": flattened}
 
 
-def load_sources(config_dir: Path | None = None) -> SourcesConfig:
+def load_sources(config_dir: Path | None = None, *, known_kinds: frozenset[str]) -> SourcesConfig:
+    """Load and validate sources.yaml.
+
+    `known_kinds` is injected rather than imported, and is required rather than optional.
+
+    Injected because `config` cannot import the adapter registry: `adapters/base.py` imports
+    `Source` from here, so reaching the other way is a cycle. The alternative -- a second
+    frozenset literal in this module, pinned to the registry by a test -- would be two
+    sources of truth for one fact. This is the same injection the project already chose for
+    the clock (`AIBlogsAdapter(clock=...)`) and for adapters themselves
+    (`fetch_all(adapters=...)`); a third mechanism for the same concern is the shape VN-10
+    flagged once already.
+
+    Required because a caller who forgets should get a `TypeError`, not silently unvalidated
+    config -- the same reasoning that makes `kind` itself required rather than defaulted.
+    """
     path = resolve_config_dir(config_dir) / SOURCES_FILENAME
     raw = _read_yaml(path)
     try:
         config = SourcesConfig.model_validate(raw)
     except ValidationError as exc:
         raise ConfigError(_format_validation_error(path, exc)) from exc
+
+    # Checked here rather than on the model so the message can name the valid set, and so a
+    # typo fails at load rather than at fetch time -- by which point four healthy sources
+    # have already been fetched and the fifth looks like an outage.
+    for source in config.sources:
+        if source.kind not in known_kinds:
+            raise ConfigError(
+                f"{path}: source {source.name!r} has kind {source.kind!r}, which no adapter "
+                f"implements. Valid kinds: {', '.join(sorted(known_kinds))}."
+            )
 
     names = [s.name for s in config.sources]
     duplicates = sorted({n for n in names if names.count(n) > 1})
@@ -248,11 +286,47 @@ def resolve_config_dir(config_dir: Path | None = None) -> Path:
     return (config_dir or Path.cwd()).expanduser().resolve()
 
 
-def load_config(config_dir: Path | None = None) -> Config:
+#: Placeholders in a source URL that this module resolves from the interest profile.
+#:
+#: Derive rather than reconcile. HN's points floor was stated twice -- `points>100` in a URL
+#: and `min_hn_points: 100` in the profile -- with a comment as the only thing tying them
+#: together, and it failed asymmetrically: raising `min_hn_points` worked, lowering it changed
+#: nothing, because the server-side filter still cut at the old value and those stories never
+#: entered the database at all. Asserting equality would have caught the drift; deriving means
+#: there is no second value to drift.
+#:
+#: Resolved here, at config load, because that is the only place both files are in hand.
+#: `{since_ts}` shares the syntax but is resolved per request in `adapters/hn.py`, and
+#: `build_request` refuses to ship any surviving `{...}` to the source.
+PROFILE_PLACEHOLDERS: dict[str, str] = {"{min_points}": "min_hn_points"}
+
+
+def _resolve_profile_placeholders(
+    sources: SourcesConfig, interests: InterestProfile
+) -> SourcesConfig:
+    """Substitute profile-derived values into source URLs. Leaves other placeholders alone."""
+    resolved = []
+    for source in sources.sources:
+        url = source.url
+        if url is not None:
+            for placeholder, field in PROFILE_PLACEHOLDERS.items():
+                if placeholder in url:
+                    url = url.replace(placeholder, str(getattr(interests.hard_rules, field)))
+        resolved.append(source if url == source.url else source.model_copy(update={"url": url}))
+    return SourcesConfig(sources=resolved)
+
+
+def load_config(config_dir: Path | None = None, *, known_kinds: frozenset[str]) -> Config:
+    """Both config files. See `load_sources` for why `known_kinds` is injected and required."""
     resolved = resolve_config_dir(config_dir)
+    # sources first, interests second: that is the order errors were reported in before
+    # placeholder resolution needed both, and reversing it would change which of two
+    # broken files a reader is told about first.
+    sources = load_sources(resolved, known_kinds=known_kinds)
+    interests = load_interests(resolved)
     return Config(
-        sources=load_sources(resolved),
-        interests=load_interests(resolved),
+        sources=_resolve_profile_placeholders(sources, interests),
+        interests=interests,
         config_dir=resolved,
     )
 

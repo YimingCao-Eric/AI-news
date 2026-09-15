@@ -7,28 +7,44 @@
 #               re-run over history offline (PLAN.md section 4). `null` means unlimited.
 # `enabled`     config intent. Distinct from the runtime health record in the `sources`
 #               table, which tracks consecutive_failures.
+# `kind`        which adapter IMPLEMENTATION serves this source; `name` identifies the
+#               source itself. They coincide today because each implementation serves
+#               exactly one source -- a second RSS source would declare an existing kind,
+#               and that is the moment to rename the implementation. `kind` never says
+#               how many endpoints a source has: that is `url` vs `feeds`, normalised by
+#               `Source.endpoints`, and adapters iterate rather than ask. An unknown kind
+#               is rejected when this file loads, not when the source is fetched.
 
 sources:
   - name: hn
-    kind: json_api
+    kind: hn
     # search_by_date, not tags=front_page: this job runs once a day at 07:00, and a
     # front-page snapshot misses anything that peaked at 03:00 and rolled off. The points
-    # floor matches interests.yaml hard_rules.min_hn_points.
+    # {min_points} is resolved AT CONFIG LOAD from interests.yaml hard_rules.min_hn_points,
+    # so the floor is stated once. It used to be the literal 100 here and 100 there with a
+    # comment as the only reconciliation: lowering min_hn_points would have changed nothing,
+    # because the server-side filter still cut at 100 and those stories never arrived.
+    #
+    # The two placeholders resolve at DIFFERENT STAGES despite sharing a syntax:
+    #   {min_points}  config load  -- from the interest profile, before any request
+    #   {since_ts}    fetch time   -- from the clock, per request (adapters/hn.py)
+    # Either one surviving unresolved is caught by hn.build_request, which refuses to ship
+    # a literal brace to Algolia.
     # {since_ts} is a unix timestamp the adapter computes at fetch time: now - 48h
-    # (adapters/hn.py LOOKBACK_HOURS). Not 24h -- a story posted 30h ago that only crosses
+    # (adapters/hn.py REQUEST_WINDOW_HOURS). Not 24h -- a story posted 30h ago that crosses
     # 100 points this morning was never inside a 24h window on either run, so slow burners
     # would be missed permanently. Re-seeing yesterday's items is free once phase 2 dedupes
     # on url hash. The adapter finds this placeholder in the parsed query params, so moving
     # the window to a different param here needs no code change.
     # Fallback if the date search ever disappoints:
     #   https://hn.algolia.com/api/v1/search?tags=front_page
-    url: "https://hn.algolia.com/api/v1/search_by_date?tags=story&numericFilters=points>100,created_at_i>{since_ts}"
+    url: "https://hn.algolia.com/api/v1/search_by_date?tags=story&numericFilters=points>{min_points},created_at_i>{since_ts}"
     weight: 1.0
     fetch_limit: 30
     enabled: true
 
   - name: gh_trending
-    kind: html
+    kind: gh_trending
     # No official API and never has been; the HTML is stable. Mirror feeds exist
     # (mshibanami/GitHubTrendingRSS) if the scrape turns out to be a maintenance burden.
     url: "https://github.com/trending?since=daily&spoken_language_code=en"
@@ -37,7 +53,7 @@ sources:
     enabled: true
 
   - name: hf_papers
-    kind: json_api
+    kind: hf_papers
     # The curated daily-papers feed -- far better signal than raw new-model listings.
     url: "https://huggingface.co/api/daily_papers"
     weight: 1.1
@@ -45,7 +61,7 @@ sources:
     enabled: true
 
   - name: ai_blogs
-    kind: rss
+    kind: ai_blogs
     # A bundle: six endpoints sharing one weight, one fetch budget and one health record.
     # Rule is official feed first, community mirror only where no official feed exists.
     #
@@ -95,7 +111,7 @@ sources:
     enabled: true
 
   - name: arxiv_cs_ai
-    kind: rss
+    kind: arxiv
     # A bundle, despite the name: one adapter serves several categories.
     #
     # VOLUME MEASURED 2026-09-14: cs.AI 270 entries, cs.CL 115, cs.MA 16. Not the ~50/day

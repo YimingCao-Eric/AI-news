@@ -13,14 +13,23 @@ from urllib.parse import parse_qsl
 
 import httpx
 
+from digest.adapters._mapping import normalise_title, parse_iso_utc
 from digest.adapters.base import Adapter
 from digest.config import Source
+from digest.errors import unmappable_entry
 from digest.models import Item
 
 #: Placeholder in the configured URL's query string, replaced with a unix timestamp.
 SINCE_TS_PLACEHOLDER = "{since_ts}"
 
-#: How far back to *ingest*.
+#: How far back the outgoing *request* asks for: items older than this are never fetched.
+#:
+#: One of three windows that must stay distinct, now named for the stage each acts at:
+#:   REQUEST_WINDOW_HOURS (here)        -- the request; old items never arrive
+#:   ai_blogs.INGEST_MAX_AGE_DAYS       -- after parsing; old entries arrive but are not stored
+#:   interests.yaml max_age_hours       -- selection; how old an item may be and still be chosen
+#:
+#: They share the value 48 today and are NOT the same concept.
 #:
 #: 48h, not 24h: a story posted 30 hours ago that only crosses 100 points this morning was
 #: never inside a 24h window on either run, so slow burners would be missed permanently.
@@ -30,9 +39,14 @@ SINCE_TS_PLACEHOLDER = "{since_ts}"
 #: must not be merged: this is how far back we ingest, `max_age_hours` is how old an item may
 #: be and still be selected into a digest. They are meant to be able to diverge -- fetching
 #: 72h while selecting 48h is a reasonable thing to want once slow-burner behaviour is
-#: understood. The right phase 3 move is an assertion that this is >= max_age_hours, never a
-#: merge; collapsing them silently undoes the slow-burner fix above.
-LOOKBACK_HOURS = 48
+#: understood. The right move is an assertion that this is >= max_age_hours, never a merge;
+#: collapsing them silently undoes the slow-burner fix above.
+#:
+#: **Owed by phase 3b (LC-6, deferred in docs/reviews/triage.md).** Written as "the right
+#: phase 3 move" while phase 3 was ahead of us; 3a shipped without it, so the instruction had
+#: quietly become a description of something that already should have happened. The assertion
+#: belongs wherever `max_age_hours` is first read for selection.
+REQUEST_WINDOW_HOURS = 48
 
 #: Any leftover `{...}` after substitution means a typo'd placeholder in sources.yaml.
 _UNRESOLVED_PLACEHOLDER = re.compile(r"\{[^}]*\}")
@@ -41,7 +55,7 @@ _HN_ITEM_URL = "https://news.ycombinator.com/item?id={object_id}"
 
 
 class HNAdapter(Adapter):
-    name = "hn"
+    kind = "hn"
 
     async def fetch(self, client: httpx.AsyncClient, source: Source) -> list[Item]:
         base_url, params = build_request(source, now=datetime.now(tz=UTC))
@@ -67,7 +81,7 @@ def build_request(source: Source, now: datetime) -> tuple[str, dict[str, Any]]:
         raise ValueError(f"source {source.name!r} has no url; HN is not a bundle source.")
 
     base_url, _, query = source.url.partition("?")
-    since_ts = int((now - timedelta(hours=LOOKBACK_HOURS)).timestamp())
+    since_ts = int((now - timedelta(hours=REQUEST_WINDOW_HOURS)).timestamp())
 
     params: dict[str, Any] = {
         key: value.replace(SINCE_TS_PLACEHOLDER, str(since_ts))
@@ -97,20 +111,27 @@ def _item_from_hit(hit: dict[str, Any], source_name: str) -> Item | None:
     if not title or not object_id:
         return None
 
-    return Item(
-        # Ask HN / Show HN and other text posts have no outbound url; the discussion
-        # thread is the artefact in that case.
-        url=hit.get("url") or _HN_ITEM_URL.format(object_id=object_id),
-        title=title,
-        source=source_name,
-        author=hit.get("author"),
-        published_at=_published_at(hit),
-        # The whole hit, unedited -- `_highlightResult` included. PLAN.md section 4 keeps the
-        # original payload so phase 4 can re-score weeks of history after the ranker changes,
-        # and the field you did not think you needed is the one you will want then. "raw is
-        # raw" is worth more than the kilobytes; a documented exception invites undocumented ones.
-        raw=hit,
-    )
+    url = hit.get("url") or _HN_ITEM_URL.format(object_id=object_id)
+    try:
+        return Item(
+            # Ask HN / Show HN and other text posts have no outbound url; the discussion
+            # thread is the artefact in that case.
+            url=url,
+            title=normalise_title(title),
+            source=source_name,
+            author=hit.get("author"),
+            published_at=_published_at(hit),
+            # The whole hit, unedited -- `_highlightResult` included. PLAN.md section 4
+            # keeps the original payload so phase 4 can re-score weeks of history after the
+            # ranker changes, and the field you did not think you needed is the one you will
+            # want then. "raw is raw" is worth more than the kilobytes.
+            raw=hit,
+        )
+    # ValidationError is a ValueError subclass, so this also catches a date string the
+    # parser rejects *before* the model sees it -- which is where a malformed entry
+    # actually escaped first, naming nothing.
+    except ValueError as exc:
+        raise unmappable_entry(source_name, None, url, exc) from exc
 
 
 def _published_at(hit: dict[str, Any]) -> datetime | None:
@@ -124,10 +145,4 @@ def _published_at(hit: dict[str, Any]) -> datetime | None:
     created_at_i = hit.get("created_at_i")
     if isinstance(created_at_i, int | float):
         return datetime.fromtimestamp(created_at_i, tz=UTC)
-
-    created_at = hit.get("created_at")
-    if isinstance(created_at, str) and created_at:
-        parsed = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-        # models.Item rejects naive datetimes; convert rather than work around the validator.
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-    return None
+    return parse_iso_utc(hit.get("created_at") or "")

@@ -22,6 +22,10 @@ from pathlib import Path
 import httpx
 import yaml
 
+from digest.adapters.hn import build_request
+from digest.config import load_config
+from digest.fetch import KNOWN_KINDS
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = REPO_ROOT / "tests" / "fixtures"
 SOURCES_YAML = REPO_ROOT / "sources.yaml"
@@ -30,6 +34,15 @@ USER_AGENT = "AI-news-digest/0.1 (+https://github.com/YimingCao-Eric/AI-news)"
 TIMEOUT = 30.0
 
 ARXIV_CATEGORIES = ("cs.AI", "cs.CL", "cs.MA")
+
+#: Written on every run. The pipeline snapshot pins its clock to `captured_at` from here.
+#:
+#: This is not decoration. `ai_blogs` filters entries against `now - INGEST_MAX_AGE_DAYS`,
+#: so a snapshot generated with a hardcoded date would produce zero rows once the fixtures
+#: aged past the cutoff -- a snapshot of nothing, produced by a test that passes. Deriving
+#: the pinned clock from the fixture set means re-recording updates it as a side effect,
+#: rather than as something someone has to remember.
+MANIFEST_FILENAME = "manifest.json"
 
 
 def _client() -> httpx.Client:
@@ -63,15 +76,23 @@ def _configured(source_name: str) -> dict:
 
 
 def record_hn(client: httpx.Client) -> None:
-    """Two fixtures: the story window, and an Ask HN page for the missing-url fallback."""
-    from datetime import timedelta
+    """Two fixtures: the story window, and an Ask HN page for the missing-url fallback.
 
-    since = int((datetime.now(tz=UTC) - timedelta(hours=48)).timestamp())
-    response = _get(
-        client,
-        "https://hn.algolia.com/api/v1/search_by_date"
-        f"?tags=story&numericFilters=points>100,created_at_i>{since}&hitsPerPage=30",
-    )
+    The story request is built by the adapter's own `build_request` against the loaded
+    config, not hand-written here. It used to be a literal URL duplicating sources.yaml --
+    the points floor, the 48h window and the page size all restated -- so changing any of
+    them in config left the recorder capturing a window production no longer uses, and the
+    snapshot would have been built from fixtures that did not match the pipeline.
+
+    Routing through `build_request` also puts the recorder behind the guard that refuses to
+    ship an unresolved `{...}`: `{min_points}` is resolved at config load and `{since_ts}` per
+    request, so a recorder reading raw YAML would have sent Algolia a literal brace and the
+    next refresh would have captured a wrong or empty fixture, weeks before anyone noticed.
+    """
+    source = load_config(REPO_ROOT, known_kinds=KNOWN_KINDS).sources.by_name("hn")
+    base_url, params = build_request(source, now=datetime.now(tz=UTC))
+    request = httpx.Request("GET", base_url, params=params)
+    response = _get(client, str(request.url))
     _write("hn_search_by_date.json", json.dumps(response.json(), indent=2, ensure_ascii=False))
 
     # Text posts are the only hits with no `url` key, and a points-filtered story window
@@ -108,6 +129,43 @@ def record_ai_blogs(client: httpx.Client) -> None:
         _write(f"ai_blogs_{feed['name']}.xml", response.text)
 
 
+def write_manifest(sources: list[str], captured_at: datetime) -> None:
+    """Record when this fixture set was captured, and from which sources.
+
+    ⚠️ **One `captured_at` for the whole set, and a partial refresh rewrites it (R3-1).**
+    `--source arxiv` stamps *now* while twelve of the thirteen fixtures stay where they were,
+    and both `tests/conftest.py::fixture_captured_at` and `snapshot_pipeline.py::snapshot_now`
+    pin the `ai_blogs` clock to that one value. Refresh only arXiv in a month and the pinned
+    clock jumps a month, pushing every `ai_blogs` entry past `INGEST_MAX_AGE_DAYS`: the source
+    empties and its tests fail for a reason that has nothing to do with arXiv.
+
+    **So: refresh with `--source all` until this is fixed.** The fix is a per-source
+    `captured_at` (`{"sources": {"arxiv": {"captured_at": ...}}}`) with `snapshot_now()`
+    taking the oldest, that being the only instant at which every fixture is simultaneously
+    valid. It changes the manifest format, which the snapshot test reads, so it wants doing
+    deliberately -- **if you are editing this file, that moment has arrived.**
+    See docs/reviews/found-during-r3.md.
+    """
+    manifest = {
+        "captured_at": captured_at.astimezone(UTC).isoformat(),
+        "sources": sorted(sources),
+        "note": (
+            "captured_at pins the clock for scripts/snapshot_pipeline.py. Time-windowed "
+            "adapters (ai_blogs INGEST_MAX_AGE_DAYS) produce a different row set as "
+            "fixtures age, so the snapshot is only reproducible against this instant."
+        ),
+    }
+    _write(MANIFEST_FILENAME, json.dumps(manifest, indent=2) + "\n")
+
+
+def newest_fixture_mtime() -> datetime:
+    """Capture instant for a fixture set recorded before manifests existed."""
+    files = [p for p in FIXTURES.glob("*") if p.name != MANIFEST_FILENAME]
+    if not files:
+        raise SystemExit("no fixtures to stamp")
+    return datetime.fromtimestamp(max(p.stat().st_mtime for p in files), tz=UTC)
+
+
 def record_gh_trending(client: httpx.Client) -> None:
     response = _get(client, "https://github.com/trending?since=daily&spoken_language_code=en")
     _write("gh_trending.html", response.text)
@@ -136,11 +194,25 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Source to record; repeatable. One of: {', '.join(RECORDERS)}, all.",
     )
     parser.add_argument("--list", action="store_true", help="List recordable sources and exit.")
+    parser.add_argument(
+        "--manifest-only",
+        action="store_true",
+        help=(
+            "Write manifest.json for the fixtures already on disk, without fetching. "
+            "For a set recorded before manifests existed; captured_at comes from the "
+            "newest fixture mtime."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.list:
         for name in RECORDERS:
             print(name)
+        return 0
+    if args.manifest_only:
+        captured_at = newest_fixture_mtime()
+        write_manifest(list(RECORDERS), captured_at)
+        print(f"stamped existing fixtures: captured_at={captured_at.isoformat()}")
         return 0
     if not args.source:
         parser.error("--source is required (or --list)")
@@ -148,6 +220,7 @@ def main(argv: list[str] | None = None) -> int:
     names = list(RECORDERS) if "all" in args.source else list(dict.fromkeys(args.source))
 
     failures: list[str] = []
+    started_at = datetime.now(tz=UTC)
     with _client() as client:
         for name in names:
             print(f"\n[{name}]")
@@ -157,6 +230,10 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:
                 print(f"  FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
                 failures.append(name)
+
+    # Written even on partial failure: the manifest describes the fixture set on disk, and
+    # a half-refreshed set still needs its clock pinned to when it was captured.
+    write_manifest(names, started_at)
 
     print(f"\nrecorded {len(names) - len(failures)}/{len(names)} source(s)")
     if failures:

@@ -32,7 +32,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from digest.models import Item, SourceHealth
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class StoreError(Exception):
@@ -220,9 +220,27 @@ CREATE TABLE IF NOT EXISTS sources (
   etag                 TEXT,
   last_modified        TEXT,
   last_success_at      TEXT,
-  consecutive_failures INTEGER NOT NULL DEFAULT 0
+  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  last_failure_at      TEXT,
+  total_failures       INTEGER NOT NULL DEFAULT 0
 );
 """
+
+#: Upgrades keyed by the version being upgraded *from*. Applied in order until the stored
+#: version reaches SCHEMA_VERSION.
+#:
+#: Written rather than skipped because the alternative -- "delete the file and refetch" --
+#: discards accumulated `first_seen_at` history and `raw_json`, which PLAN.md section 4 says
+#: exist precisely so the ranker can be re-run over weeks of history offline. Phase 3b is
+#: about to change the ranker. And once phase 5's Action commits digest.db back to the repo,
+#: the database stops being disposable and the first migration would get written under
+#: pressure instead of while the data is still cheap.
+_MIGRATIONS: dict[int, tuple[str, ...]] = {
+    1: (
+        "ALTER TABLE sources ADD COLUMN last_failure_at TEXT",
+        "ALTER TABLE sources ADD COLUMN total_failures INTEGER NOT NULL DEFAULT 0",
+    ),
+}
 
 _ITEM_COLUMNS = (
     "url",
@@ -262,8 +280,20 @@ def checkpoint(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
 
-def init_db(path: str | Path) -> sqlite3.Connection:
-    """Create the schema if absent and verify the version. Idempotent."""
+def init_db(path: str | Path, *, create: bool = True) -> sqlite3.Connection:
+    """Create the schema if absent and verify the version. Idempotent.
+
+    `create=False` refuses to bring a database into existence. Readers want it: `sqlite3`
+    creates an empty file for any path you hand it, so `digest render --db typo.db` used to
+    produce a brand-new database and the message "Nothing new" -- a confident empty digest
+    indistinguishable from a real one. The failure and the success looked the same.
+    """
+    if not create and not Path(path).exists():
+        raise StoreError(
+            f"no digest database at {Path(path).resolve()}\n"
+            f"       This command reads an existing database and will not create one.\n"
+            f"       Run `digest fetch` first, or pass --db with the right path."
+        )
     conn = connect(path)
     conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
 
@@ -280,15 +310,39 @@ def init_db(path: str | Path) -> sqlite3.Connection:
                 f"older code corrupts data silently. Upgrade the code, or point --db elsewhere."
             )
         if found < SCHEMA_VERSION:
-            conn.close()
-            raise StoreError(
-                f"database at {path} is schema version {found}, this code expects "
-                f"{SCHEMA_VERSION}, and no migration exists yet. Delete the file to start "
-                f"fresh, or write the migration."
-            )
+            _migrate(conn, found, path)
 
     conn.executescript(_SCHEMA)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection, from_version: int, path: str | Path) -> None:
+    """Upgrade an older database in place, all steps or none.
+
+    Wrapped in an explicit transaction because `connect` opens in autocommit
+    (`isolation_level=None`): without it a failure half-way leaves a database whose
+    `schema_version` disagrees with its columns, which is exactly the silent corruption the
+    version check exists to prevent. SQLite makes DDL transactional, so the rollback is real.
+    """
+    version = from_version
+    conn.execute("BEGIN")
+    try:
+        while version < SCHEMA_VERSION:
+            steps = _MIGRATIONS.get(version)
+            if steps is None:
+                raise StoreError(
+                    f"database at {path} is schema version {version} and no migration to "
+                    f"{version + 1} exists. Add one to _MIGRATIONS, or delete the file to "
+                    f"start fresh -- deleting discards stored history."
+                )
+            for statement in steps:
+                conn.execute(statement)
+            version += 1
+        conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
 
 
 # ----------------------------------------------------------------------------------- items
@@ -325,13 +379,25 @@ def is_near_duplicate(
     return None
 
 
-def upsert_items(
+def insert_items(
     conn: sqlite3.Connection,
     items: Sequence[Item],
     now: datetime | None = None,
     window_days: int = 3,
 ) -> int:
-    """Insert items that are not already stored. Returns the count of genuinely new rows.
+    """Insert items that are not already stored. Returns the count of rows actually inserted.
+
+    Named `insert_items` and not `upsert_items`, which is what it was called while being
+    `INSERT OR IGNORE`: an upsert *updates* the existing row, and this discards the incoming
+    one. The name promised the opposite of the behaviour, and the payload was timed for phase
+    3b -- `score`, `topic` and `summary` are already parameters here, so the obvious call for
+    writing a ranker's output back would have returned 0 and written nothing, indistinguishable
+    from a normal second run.
+
+    Not `insert_new_items` either: "new" already means "not yet rendered" three lines away in
+    the CLI's output, and reusing it here would reintroduce the collision one rename removed.
+
+    The write-back path phase 3b needs is deliberately NOT here. That is 3b's design decision.
 
     Every item in the batch gets the *same* `first_seen_at`, so "this run" is exactly
     queryable afterwards -- which is what `count_dupes` relies on, and what makes the
@@ -397,8 +463,13 @@ def _row_to_item(row: sqlite3.Row) -> Item:
     )
 
 
-def new_items(conn: sqlite3.Connection) -> list[Item]:
+def unrendered_items(conn: sqlite3.Connection) -> list[Item]:
     """Items that have never appeared in a digest, oldest first.
+
+    Named for what it means rather than "new", which meant two different things in
+    adjacent user-visible output: the run log's count of rows *inserted this run*, and
+    this, *not yet rendered*. Run `digest fetch` twice then `digest render` and the two
+    numbers disagree completely while both are correct.
 
     "New" is `digest_date IS NULL` -- deliberately NOT "first_seen_at is today". Two reasons,
     both of which will happen:
@@ -437,44 +508,77 @@ def stamp_digest_date(
 # --------------------------------------------------------------------------- source health
 
 
-def record_source_health(conn: sqlite3.Connection, health: SourceHealth) -> None:
-    """Persist one source's outcome, maintaining the real consecutive-failure counter.
+def record_source_health(
+    conn: sqlite3.Connection,
+    name: str,
+    *,
+    succeeded_at: datetime | None = None,
+    failed_at: datetime | None = None,
+) -> None:
+    """Record one run's outcome for one source. Exactly one timestamp, never a flag.
 
-    Success is inferred from `last_success_at is not None`, which is exactly how `fetch.py`
-    builds the record. That coupling is implicit, hence this note.
+    Takes the outcome rather than deducing it. The previous signature accepted a
+    `SourceHealth` and recovered "did this run succeed" from `last_success_at is not None` --
+    correct only by accident of how one caller built the object, and silently wrong for any
+    caller that filled the field in to make the record complete.
 
-    The *store* owns the increment, not the caller: phase 1's fetch loop could only ever
-    report 0 or 1 because it has no access to the previous value. Passing
-    `health.consecutive_failures` straight through would keep it that way.
+    A timestamp rather than a bool because the store needs to know *when*: `last_failure_at`
+    is half of what makes a recovered source's history survive, and a bool could not supply
+    it. Taking `now()` here instead would put a hidden clock in the store, days after the
+    project moved clocks to injection.
+
+    **The counters stay here, deliberately.** `consecutive_failures` and `total_failures` are
+    read-modify-write against the stored row, which is persistence, not business logic -- and
+    the caller structurally cannot do it, because it cannot see the previous value. Phase 1's
+    fetch loop could only ever report 0 or 1 for exactly that reason. `SourceOutcome` carries
+    no counts at all so there is nothing to pass through and nothing to tempt anyone into
+    computing caller-side.
+
+    A success updates `last_success_at` and clears `consecutive_failures`. It does **not**
+    clear `last_failure_at` or `total_failures`: those are the record that survives recovery,
+    without which a source failing every other day reads as healthy every time you look.
     """
-    if health.last_success_at is not None:
+    if (succeeded_at is None) == (failed_at is None):
+        both = succeeded_at is not None
+        raise StoreError(
+            f"record_source_health({name!r}): pass exactly one of succeeded_at / failed_at, "
+            f"got {'both' if both else 'neither'}. A run either succeeded or failed."
+        )
+
+    if succeeded_at is not None:
         conn.execute(
             "INSERT INTO sources (name, last_success_at, consecutive_failures) "
             "VALUES (?, ?, 0) "
             "ON CONFLICT(name) DO UPDATE SET "
             "  last_success_at = excluded.last_success_at, consecutive_failures = 0",
-            (health.name, to_iso(health.last_success_at)),
+            (name, to_iso(succeeded_at)),
         )
     else:
         conn.execute(
-            "INSERT INTO sources (name, last_success_at, consecutive_failures) "
-            "VALUES (?, NULL, 1) "
+            "INSERT INTO sources "
+            "(name, last_success_at, consecutive_failures, last_failure_at, total_failures) "
+            "VALUES (?, NULL, 1, ?, 1) "
             "ON CONFLICT(name) DO UPDATE SET "
-            "  consecutive_failures = sources.consecutive_failures + 1",
-            (health.name,),
+            "  consecutive_failures = sources.consecutive_failures + 1,"
+            "  total_failures = sources.total_failures + 1,"
+            "  last_failure_at = excluded.last_failure_at",
+            (name, to_iso(failed_at)),
         )
 
 
 def get_source_health(conn: sqlite3.Connection) -> list[SourceHealth]:
     """Every source's persisted health record, by name."""
     rows = conn.execute(
-        "SELECT name, last_success_at, consecutive_failures FROM sources ORDER BY name"
+        "SELECT name, last_success_at, consecutive_failures, last_failure_at, total_failures "
+        "FROM sources ORDER BY name"
     ).fetchall()
     return [
         SourceHealth(
             name=row["name"],
             last_success_at=from_iso(row["last_success_at"]) if row["last_success_at"] else None,
             consecutive_failures=row["consecutive_failures"],
+            last_failure_at=from_iso(row["last_failure_at"]) if row["last_failure_at"] else None,
+            total_failures=row["total_failures"],
         )
         for row in rows
     ]

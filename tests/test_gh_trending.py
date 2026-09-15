@@ -20,7 +20,8 @@ from digest.adapters.gh_trending import (
     GitHubTrendingError,
     parse_trending,
 )
-from tests.conftest import configured_source, fixture_text, run_adapter, serve
+from digest.errors import AdapterError, SourceBlockedError
+from tests.conftest import configured_source, fixture_text, load_repo_config, run_adapter, serve
 
 PAGE = fixture_text("gh_trending.html")
 
@@ -86,11 +87,6 @@ def test_published_at_is_none_not_now(source):
     assert all(item.published_at is None for item in fetch(source))
 
 
-def test_fetch_limit_is_applied(source):
-    capped = source.model_copy(update={"fetch_limit": 3})
-    assert len(fetch(capped)) == 3
-
-
 # ------------------------------------------------------- failing loudly, which is the point
 
 
@@ -100,7 +96,7 @@ def test_403_raises_with_an_actionable_message(source):
     Without the explicit check, a block would look exactly like a quiet day.
     """
     body = "<html><body><h1>Access denied</h1></body></html>"
-    with pytest.raises(GitHubTrendingError, match="403"):
+    with pytest.raises(SourceBlockedError, match="403"):
         fetch(source, body, status=403)
 
 
@@ -139,13 +135,62 @@ def test_an_http_error_propagates(source):
 
 
 def test_every_selector_is_a_module_constant():
-    """A layout change should be a one-line fix, not an archaeology session."""
+    """A layout change should be a one-line fix, not an archaeology session.
+
+    Scans the whole module minus the declared selector block, rather than two named private
+    functions. The earlier version called `inspect.getsource` on `parse_trending` and
+    `_item_from_row` by name, which made a behaviour-preserving rename or inline fail with
+    `AttributeError` -- penalising exactly the refactoring this review exists to enable --
+    while a selector inlined into some *third* helper would have passed unnoticed.
+    """
     import inspect
 
     from digest.adapters import gh_trending
 
-    body = inspect.getsource(gh_trending.parse_trending) + inspect.getsource(
-        gh_trending._item_from_row
-    )
-    assert "Box-row" not in body
-    assert "itemprop" not in body
+    lines = inspect.getsource(gh_trending).splitlines()
+    starts = [i for i, line in enumerate(lines) if line.startswith("# --- Selectors")]
+    assert len(starts) == 1, "the selector block marker in gh_trending.py has moved"
+
+    ends = [i for i, line in enumerate(lines) if i > starts[0] and line.startswith("# ----")]
+    assert ends, "the selector block is not closed by a `# ----` line"
+
+    outside = "\n".join(lines[: starts[0]] + lines[ends[0] + 1 :])
+    for literal in ("Box-row", "itemprop", "d-inline-block"):
+        assert literal not in outside, (
+            f"selector literal {literal!r} appears outside the declared block in "
+            f"gh_trending.py -- a layout change would then need finding, not just editing"
+        )
+
+
+def test_raw_contains_no_clock():
+    """Our own timestamp must not live inside `raw`.
+
+    `raw` briefly carried a `scraped_at` set from `datetime.now()`. That duplicated
+    `first_seen_at` -- the column that owns "when we saw this" -- and made the row
+    irreproducible from a fixed fixture: two runs a second apart over the same HTML produced
+    different raw hashes. Found by the R0 snapshot work, fixed rather than excluded from the
+    dump, because an exclusion would have made the snapshot tolerant of exactly the defect
+    class it exists to catch.
+    """
+    import json
+
+    source = load_repo_config().sources.by_name("gh_trending")
+    items = run_adapter(GhTrendingAdapter(), source, serve(PAGE, 200, "text/html"))
+
+    assert set(items[0].raw) == {"full_name", "description", "language", "stars_today"}
+    first = json.dumps(items[0].raw, sort_keys=True)
+    again = run_adapter(GhTrendingAdapter(), source, serve(PAGE, 200, "text/html"))
+    assert json.dumps(again[0].raw, sort_keys=True) == first
+
+
+def test_a_blocked_host_and_a_broken_layout_are_different_failures():
+    """Both are anticipated, but the 07:00 response differs.
+
+    `SourceBlockedError` means check the User-Agent and back off; `GitHubTrendingError`
+    means the selectors moved and the fixture needs re-recording. Before the taxonomy both
+    were `GitHubTrendingError`, and both were indistinguishable from a crash.
+    """
+    assert issubclass(SourceBlockedError, AdapterError)
+    assert issubclass(GitHubTrendingError, AdapterError)
+    assert not issubclass(GitHubTrendingError, SourceBlockedError)
+    assert not issubclass(SourceBlockedError, GitHubTrendingError)

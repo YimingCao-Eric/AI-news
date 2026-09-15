@@ -12,7 +12,7 @@ outcome reaches the run summary through `drain_notes`.
 """
 
 import asyncio
-import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -20,8 +20,10 @@ import feedparser
 import httpx
 from feedparser.util import FeedParserDict
 
+from digest.adapters._mapping import normalise_title, published_at_from_entry
 from digest.adapters.base import Adapter
 from digest.config import Feed, Source
+from digest.errors import SourcePayloadError, unmappable_entry
 from digest.models import Item
 
 #: Per-feed budget, deliberately well under fetch.py's 20s whole-source budget.
@@ -39,7 +41,12 @@ FEED_TIMEOUT_SECONDS = 8.0
 #: nobody edits when a feed's rhythm changes.
 DEFAULT_STALENESS_THRESHOLD_DAYS = 30
 
-#: Ingest cutoff. Entries older than this are not stored.
+#: Ingest cutoff: entries older than this are parsed but not stored.
+#:
+#: Named for its stage. `hn.REQUEST_WINDOW_HOURS` acts on the request so old items never
+#: arrive; this acts after parsing because RSS hands you the whole back catalogue whether
+#: you asked or not; `max_age_hours` in interests.yaml acts at selection. Three windows,
+#: three stages, deliberately separable.
 #:
 #: Unlike arXiv, HF papers and GitHub Trending -- all of which publish *today's* list -- these
 #: feeds carry their whole back catalogue. Measured 2026-09-14: openai_news alone serves 1193
@@ -52,9 +59,12 @@ DEFAULT_STALENESS_THRESHOLD_DAYS = 30
 #:
 #: Entries with no parseable date are KEPT. Fail toward the visible error: showing an item
 #: twice is recoverable, dropping one for a missing timestamp is not visible at all.
-MAX_ENTRY_AGE_DAYS = 30
+INGEST_MAX_AGE_DAYS = 30
 
-_WHITESPACE = re.compile(r"\s+")
+
+def utc_now() -> datetime:
+    """Default clock. Replaceable per instance -- see `AIBlogsAdapter.__init__`."""
+    return datetime.now(tz=UTC)
 
 
 @dataclass(frozen=True)
@@ -75,9 +85,23 @@ class FeedOutcome:
 
 
 class AIBlogsAdapter(Adapter):
-    name = "ai_blogs"
+    kind = "ai_blogs"
 
-    def __init__(self) -> None:
+    def __init__(self, clock: Callable[[], datetime] = utc_now) -> None:
+        """`clock` is injected rather than monkeypatched, and is a *callable*, not a value.
+
+        INGEST_MAX_AGE_DAYS and the staleness thresholds are both measured against it, so an
+        offline harness reading fixed fixtures must be able to pin it -- otherwise the same
+        recorded feeds yield 112 items today and zero thirty days from now.
+
+        Note the deliberate naming split, which is the point of the vocabulary rule it
+        follows: a long-lived object takes a `clock: Callable[[], datetime]`, because it is
+        constructed once and may fetch many times; a single function call takes a
+        `now: datetime`, because it happens at one instant. `store.insert_items(now=...)` is
+        the latter. Same concern, two lifetimes, two names -- so the difference is visible
+        rather than discovered by type error.
+        """
+        self._clock = clock
         self._notes: list[str] = []
 
     def drain_notes(self) -> list[str]:
@@ -87,7 +111,7 @@ class AIBlogsAdapter(Adapter):
     async def fetch(self, client: httpx.AsyncClient, source: Source) -> list[Item]:
         self._notes = []
         feeds = source.endpoints
-        now = datetime.now(tz=UTC)
+        now = self._clock()
 
         results = await asyncio.gather(
             *(self._fetch_feed(client, feed, source.name, now) for feed in feeds),
@@ -95,6 +119,7 @@ class AIBlogsAdapter(Adapter):
         )
 
         items: list[Item] = []
+        succeeded: list[FeedOutcome] = []
         failures = 0
         for feed, result in zip(feeds, results, strict=True):
             if isinstance(result, BaseException):
@@ -106,16 +131,28 @@ class AIBlogsAdapter(Adapter):
                 self._notes.append(f"{feed.name}: FAILED {type(result).__name__}: {result}")
                 continue
             self._notes.append(_describe(result, now))
+            succeeded.append(result)
             items.extend(result.items)
 
         if failures == len(feeds):
             # Every feed down at once is a network or mirror outage, not six quiet blogs.
-            raise RuntimeError(
+            raise SourcePayloadError(
                 f"{source.name}: all {failures} feeds failed. Notes: {'; '.join(self._notes)}"
             )
 
-        if source.fetch_limit is not None:
-            items = items[: source.fetch_limit]
+        if failures == 0 and all(outcome.total_entries == 0 for outcome in succeeded):
+            # CLAUDE.md's zero-items rule, the half that was missing: every feed parsed
+            # cleanly and every one was empty. One quiet blog is normal; six at once, with
+            # well-formed documents, means the endpoints changed shape rather than that
+            # nobody published. Note this counts *entries*, not items -- feeds full of
+            # entries that are all older than INGEST_MAX_AGE_DAYS are stale, not broken, and
+            # the per-feed STALE notes already say so.
+            raise SourcePayloadError(
+                f"{source.name}: all {len(feeds)} feeds parsed cleanly and contained zero "
+                f"entries between them. One quiet blog is normal, six is not. Re-record the "
+                f"fixtures and check the mapping. Notes: {'; '.join(self._notes)}"
+            )
+
         return items
 
     async def _fetch_feed(
@@ -134,7 +171,7 @@ class AIBlogsAdapter(Adapter):
 
         parsed = feedparser.parse(response.text)
         if parsed.bozo and not parsed.entries:
-            raise ValueError(
+            raise SourcePayloadError(
                 f"{source_name}/{feed.name}: unparseable XML from {feed.url} "
                 f"({parsed.bozo_exception})"
             )
@@ -151,7 +188,7 @@ class AIBlogsAdapter(Adapter):
         dated = [item.published_at for item in all_items if item.published_at is not None]
         newest = max(dated) if dated else None
 
-        cutoff = now - timedelta(days=MAX_ENTRY_AGE_DAYS)
+        cutoff = now - timedelta(days=INGEST_MAX_AGE_DAYS)
         recent = [
             item for item in all_items if item.published_at is None or item.published_at >= cutoff
         ]
@@ -224,19 +261,17 @@ def _item_from_entry(entry: FeedParserDict, source_name: str, feed_name: str) ->
     # untraceable once its items are mixed into one source's output.
     raw["feed_name"] = feed_name
 
-    return Item(
-        url=link,
-        title=_WHITESPACE.sub(" ", title).strip(),
-        source=source_name,
-        author=entry.get("author"),
-        published_at=_published_at(entry),
-        raw=raw,
-    )
-
-
-def _published_at(entry: FeedParserDict) -> datetime | None:
-    """feedparser normalises to a naive UTC struct_time; Item rejects naive datetimes."""
-    parsed = entry.get("published_parsed") or entry.get("updated_parsed")
-    if parsed is None:
-        return None
-    return datetime(*parsed[:6], tzinfo=UTC)
+    try:
+        return Item(
+            url=link,
+            title=normalise_title(title),
+            source=source_name,
+            author=entry.get("author"),
+            published_at=published_at_from_entry(entry),
+            raw=raw,
+        )
+    # ValidationError is a ValueError subclass, so this also catches a date string the
+    # parser rejects *before* the model sees it -- which is where a malformed entry
+    # actually escaped first, naming nothing.
+    except ValueError as exc:
+        raise unmappable_entry(source_name, feed_name, link, exc) from exc

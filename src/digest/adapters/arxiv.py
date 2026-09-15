@@ -6,14 +6,15 @@ entries, cs.CL 115, cs.MA 16 -- five times the ~50/day the plan assumed.
 
 import asyncio
 import re
-from datetime import UTC, datetime
 
 import feedparser
 import httpx
 from feedparser.util import FeedParserDict
 
+from digest.adapters._mapping import normalise_title, published_at_from_entry
 from digest.adapters.base import Adapter
 from digest.config import Feed, Source
+from digest.errors import SourcePayloadError, unmappable_entry
 from digest.models import Item
 
 #: arXiv marks each entry with why it appeared. `new` is a first announcement and `cross` is
@@ -34,15 +35,13 @@ KEPT_ANNOUNCE_TYPES = frozenset({"new", "cross"})
 #: not a hazard present in today's data, and saying otherwise would be inventing one.
 _ARXIV_TITLE_PREFIX = re.compile(r"^\s*arXiv:\s*\d{4}\.\d{4,5}(v\d+)?\s*(\[[^\]]*\])?\s*[:\-]?\s*")
 
-_WHITESPACE = re.compile(r"\s+")
-
 #: Per-feed budget. The outer 20s in fetch.py covers the whole source; without this, one slow
 #: category could spend it all and cost the other two.
 FEED_TIMEOUT_SECONDS = 10.0
 
 
 class ArxivAdapter(Adapter):
-    name = "arxiv_cs_ai"
+    kind = "arxiv"
 
     def __init__(self) -> None:
         self._notes: list[str] = []
@@ -62,6 +61,7 @@ class ArxivAdapter(Adapter):
 
         per_feed: list[list[Item]] = []
         failures = 0
+        announced = 0
         for feed, result in zip(feeds, results, strict=True):
             if isinstance(result, BaseException):
                 if not isinstance(result, Exception):
@@ -69,23 +69,45 @@ class ArxivAdapter(Adapter):
                 failures += 1
                 self._notes.append(f"{feed.name}: FAILED {type(result).__name__}: {result}")
                 continue
-            per_feed.append(result)
-            self._notes.append(f"{feed.name}: {len(result)} new/cross")
+            kept, total_entries = result
+            per_feed.append(kept)
+            announced += total_entries
+            # The pre-filter count is the point: "0 of 0" is a quiet day, "0 of 270" is a
+            # broken filter, and without the denominator both print as a bare zero. The
+            # filter keys on a string field, so an arXiv rename of `new`/`cross` would drop
+            # 100% of input while the source reported success.
+            self._notes.append(f"{feed.name}: {len(kept)} new/cross of {total_entries} entries")
 
         if failures == len(feeds):
-            raise RuntimeError(
+            raise SourcePayloadError(
                 f"{source.name}: every category failed ({failures}/{len(feeds)}). "
                 f"Notes: {'; '.join(self._notes)}"
             )
 
+        if announced == 0 and failures == 0:
+            # Every category parsed and every one was empty. arXiv is genuinely quiet on some
+            # days, but not on all three categories at once with well-formed documents --
+            # CLAUDE.md's zero-items rule: that is "we no longer understand this endpoint".
+            raise SourcePayloadError(
+                f"{source.name}: all {len(feeds)} categories parsed cleanly and announced "
+                f"zero entries between them. One quiet category is normal; all of them is "
+                f"the feed shape changing. Re-record the fixtures and check the mapping. "
+                f"Notes: {'; '.join(self._notes)}"
+            )
+
         items = _round_robin(per_feed)
-        if source.fetch_limit is not None:
-            items = items[: source.fetch_limit]
         return items
 
     async def _fetch_feed(
         self, client: httpx.AsyncClient, feed: Feed, source_name: str
-    ) -> list[Item]:
+    ) -> tuple[list[Item], int]:
+        """Return the kept items and how many entries the feed announced before filtering.
+
+        A plain tuple rather than a named per-feed result type: `ai_blogs.FeedOutcome` is one
+        already, and a second would be the fourth result type in the project -- the recorded
+        trigger for reconciling all of them, which Themes 5 and 6 own. Not pre-empting that
+        decision here.
+        """
         async with asyncio.timeout(FEED_TIMEOUT_SECONDS):
             response = await client.get(feed.url)
         response.raise_for_status()
@@ -93,20 +115,22 @@ class ArxivAdapter(Adapter):
         parsed = feedparser.parse(response.text)
         if parsed.bozo and not parsed.entries:
             # Malformed XML *and* nothing parsed: we no longer understand this endpoint.
-            raise ValueError(
+            raise SourcePayloadError(
                 f"{source_name}/{feed.name}: {feed.url} returned unparseable XML "
                 f"({parsed.bozo_exception}). Zero entries from a broken document is not a "
                 f"quiet day."
             )
 
         # A genuinely empty category is possible -- arXiv does not announce every day -- so
-        # this returns [] rather than raising. The count reaches the summary via notes.
-        return [
+        # this returns [] rather than raising. The counts reach the summary via notes, and
+        # the all-categories-empty case is the caller's to judge.
+        kept = [
             item
             for entry in parsed.entries
             if entry.get("arxiv_announce_type", "new") in KEPT_ANNOUNCE_TYPES
             and (item := _item_from_entry(entry, source_name, feed.name)) is not None
         ]
+        return kept, len(parsed.entries)
 
 
 def _round_robin(per_feed: list[list[Item]]) -> list[Item]:
@@ -130,7 +154,7 @@ def _round_robin(per_feed: list[list[Item]]) -> list[Item]:
 
 def clean_title(title: str) -> str:
     """Strip the (currently absent) `arXiv:ID` prefix and normalise whitespace."""
-    return _WHITESPACE.sub(" ", _ARXIV_TITLE_PREFIX.sub("", title)).strip()
+    return normalise_title(_ARXIV_TITLE_PREFIX.sub("", title))
 
 
 def _item_from_entry(entry: FeedParserDict, source_name: str, feed_name: str) -> Item | None:
@@ -142,22 +166,20 @@ def _item_from_entry(entry: FeedParserDict, source_name: str, feed_name: str) ->
     raw = dict(entry)
     raw["feed_name"] = feed_name
 
-    return Item(
-        url=link,
-        title=clean_title(title),
-        source=source_name,
-        author=entry.get("author"),
-        published_at=_published_at(entry),
-        # The abstract stays in `summary` here, untouched. CLAUDE.md forbids fetching or
-        # summarising bodies; keeping the one the feed already gave us costs nothing and is
-        # what phase 4 will re-score against.
-        raw=raw,
-    )
-
-
-def _published_at(entry: FeedParserDict) -> datetime | None:
-    """feedparser hands back a naive struct_time in UTC; Item rejects naive values."""
-    parsed = entry.get("published_parsed") or entry.get("updated_parsed")
-    if parsed is None:
-        return None
-    return datetime(*parsed[:6], tzinfo=UTC)
+    try:
+        return Item(
+            url=link,
+            title=clean_title(title),
+            source=source_name,
+            author=entry.get("author"),
+            published_at=published_at_from_entry(entry),
+            # The abstract stays in `summary` here, untouched. CLAUDE.md forbids fetching or
+            # summarising bodies; keeping the one the feed already gave us costs nothing and
+            # is what phase 4 will re-score against.
+            raw=raw,
+        )
+    # ValidationError is a ValueError subclass, so this also catches a date string the
+    # parser rejects *before* the model sees it -- which is where a malformed entry
+    # actually escaped first, naming nothing.
+    except ValueError as exc:
+        raise unmappable_entry(source_name, feed_name, link, exc) from exc

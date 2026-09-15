@@ -21,6 +21,7 @@ import asyncio
 import json
 import socket
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,9 @@ import httpx
 import pytest
 
 from digest.adapters.base import Adapter
-from digest.config import InterestProfile, Source, load_config
+from digest.config import Config, InterestProfile, Source, load_config
+from digest.errors import DigestControlError
+from digest.fetch import KNOWN_KINDS
 from digest.models import Item
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -44,13 +47,40 @@ def fixture_json(name: str) -> Any:
     return json.loads(fixture_text(name))
 
 
+def load_repo_config() -> Config:
+    """The shipped config, with the registry's kinds supplied.
+
+    `load_config` requires `known_kinds` rather than importing the registry, because
+    `adapters/base.py` imports `Source` from `config` and reaching back would be a cycle.
+    Required rather than optional so a caller who forgets gets a TypeError instead of
+    silently unvalidated config.
+    """
+    return load_config(REPO_ROOT, known_kinds=KNOWN_KINDS)
+
+
 def configured_source(name: str) -> Source:
     """The real entry from sources.yaml -- tests the shipped config, not a stand-in."""
-    return load_config(REPO_ROOT).sources.by_name(name)
+    return load_repo_config().sources.by_name(name)
 
 
 def configured_interests() -> InterestProfile:
-    return load_config(REPO_ROOT).interests
+    return load_repo_config().interests
+
+
+def fixture_captured_at() -> datetime:
+    """When the recorded fixtures were captured. The clock any fixture-reading test must use.
+
+    Time-windowed adapters measure against `now`, so a test that reads frozen fixtures with
+    a live clock has a shelf life. Before this existed, four `ai_blogs` tests were dated to
+    fail on 2026-09-21 and 2026-10-01 with no code change -- and their failure mode was
+    worse than a red suite: it trains you to re-record fixtures, which is also the correct
+    response to a feed genuinely dying, so the two stop being distinguishable.
+
+    R0 already solved this for the pipeline snapshot. This is the same solution, wired into
+    the unit tests that needed it most.
+    """
+    manifest = json.loads((FIXTURES / "manifest.json").read_text(encoding="utf-8"))
+    return datetime.fromisoformat(manifest["captured_at"]).astimezone(UTC)
 
 
 def run_adapter(
@@ -109,14 +139,14 @@ _real_getaddrinfo = socket.getaddrinfo
 _real_create_connection = socket.create_connection
 
 
-class NetworkAccessInTestError(BaseException):
+class NetworkAccessInTestError(DigestControlError):
     """Raised when a test tries to open a non-loopback connection.
 
-    Derives from BaseException, not Exception, on purpose. `fetch.py` catches every
-    `Exception` so that no source can abort a run -- which is correct in production but
-    would turn a leaking test into a silently empty result rather than a failure. Sitting
-    outside `Exception`, like KeyboardInterrupt, means this propagates through the
-    resilience layer and fails the test that leaked.
+    A `DigestControlError`: the suite guarantees it cannot reach the network, and that
+    assumption about its own execution has been violated -- no feed did anything wrong.
+    The base carries the BaseException reasoning that used to be duplicated here and in
+    `scripts/snapshot_pipeline.py`, discovered independently both times by a test failing
+    with the wrong message.
     """
 
     def __init__(self, target: object) -> None:

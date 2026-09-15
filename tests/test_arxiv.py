@@ -5,6 +5,7 @@ Fixtures recorded with:
     uv run python scripts/record_fixtures.py --source arxiv
 """
 
+import re
 from datetime import timedelta
 
 import feedparser
@@ -62,10 +63,19 @@ def test_revisions_are_excluded(source):
 
 
 def test_the_announce_filter_is_load_bearing():
-    """Proof it earns its place: without it, a third of arXiv would be revisions."""
+    """Proof it earns its place: without it, revisions would enter the digest as new work.
+
+    Asserts revisions *exist* rather than that they exceed a share. The share was measured at
+    38% on 2026-09-14 (cs.AI: cross 98, replace-cross 72, new 69, replace 31), and an earlier
+    version of this test asserted `> 0.25` -- a property of that particular day rather than of
+    the code. A quiet Sunday re-record could drop it to 20% and fail a test with nothing
+    wrong, which trains you to re-record until green. The fact that matters is that arXiv
+    announces revisions at all, which is true of every day it publishes.
+    """
     entries = parsed(CS_AI)
     revisions = [e for e in entries if e.arxiv_announce_type not in KEPT_ANNOUNCE_TYPES]
-    assert len(revisions) / len(entries) > 0.25
+    assert revisions, "fixture contains no revisions -- the filter has nothing to do"
+    assert len(revisions) < len(entries), "everything is a revision; re-record"
 
 
 def test_new_and_cross_are_both_kept(source):
@@ -207,14 +217,49 @@ def test_unparseable_xml_with_no_entries_raises(source):
         fetch(source, bodies)
 
 
-def test_an_empty_but_valid_feed_is_not_an_error(source):
-    """arXiv does not announce every day; empty is a state it can genuinely be in."""
-    empty = '<?xml version="1.0"?><rss version="2.0"><channel><title>cs.AI</title></channel></rss>'
-    adapter = ArxivAdapter()
-    items = run_adapter(adapter, source, serve_by_url(dict.fromkeys(BODIES, empty)))
+EMPTY_FEED = '<?xml version="1.0"?><rss version="2.0"><channel><title>cs.X</title></channel></rss>'
 
-    assert items == []
-    assert all("0 new/cross" in note for note in adapter.drain_notes())
+
+def test_one_empty_category_is_not_an_error(source):
+    """arXiv does not announce every day; an empty category is a state it can be in."""
+    adapter = ArxivAdapter()
+    bodies = {**BODIES, "https://rss.arxiv.org/rss/cs.MA": EMPTY_FEED}
+    items = run_adapter(adapter, source, serve_by_url(bodies))
+
+    assert items
+    assert any("cs.MA: 0 new/cross of 0 entries" in note for note in adapter.drain_notes())
+
+
+def test_every_category_announcing_nothing_is_an_error(source):
+    """One quiet category is normal; all three, parsing cleanly, is a changed feed shape.
+
+    CLAUDE.md's zero-items rule. Previously `failures == len(feeds)` counted only
+    *exceptions*, so three well-formed empty documents were a successful fetch of zero items
+    -- indistinguishable from a quiet weekend, forever.
+    """
+    with pytest.raises(RuntimeError, match="announced zero entries"):
+        run_adapter(ArxivAdapter(), source, serve_by_url(dict.fromkeys(BODIES, EMPTY_FEED)))
+
+
+def test_filtering_every_entry_is_visible_not_silent(source):
+    """SF-8: the announce filter keys on a string field arXiv could rename.
+
+    If `new`/`cross` ever become something else, every entry is dropped and the source
+    reports success with zero items. The note carries the pre-filter count so the two cases
+    read differently: "0 of 0" is a quiet day, "0 of 270" is a broken filter.
+    """
+    adapter = ArxivAdapter()
+    items = run_adapter(adapter, source, serve_by_url(BODIES))
+    notes = adapter.drain_notes()
+
+    assert items
+    for note in notes:
+        assert " of " in note and "entries" in note
+
+    cs_ai = next(note for note in notes if note.startswith("cs.AI"))
+    kept, announced = (int(part) for part in re.findall(r"\d+", cs_ai)[:2])
+    assert announced > kept, "the fixture should contain revisions the filter drops"
+    assert announced == len(parsed(CS_AI))
 
 
 def test_notes_are_drained_between_runs(source):

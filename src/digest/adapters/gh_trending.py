@@ -12,13 +12,14 @@ the rot the health footer cannot catch. See CLAUDE.md, the zero-items rule.
 """
 
 import re
-from datetime import UTC, datetime
 
 import httpx
 from selectolax.parser import HTMLParser, Node
 
+from digest.adapters._mapping import normalise_title
 from digest.adapters.base import Adapter
 from digest.config import Source
+from digest.errors import SourceBlockedError, SourcePayloadError
 from digest.models import Item
 
 # --- Selectors. Verified 2026-09-14. Change here, not inline. ----------------------------
@@ -32,15 +33,20 @@ SELECTOR_STARS_TODAY = "span.d-inline-block.float-sm-right"
 GITHUB_BASE = "https://github.com"
 
 _STARS_TODAY = re.compile(r"([\d,]+)\s+stars?\s+today")
-_WHITESPACE = re.compile(r"\s+")
 
 
-class GitHubTrendingError(RuntimeError):
-    """The page no longer looks like GitHub Trending."""
+class GitHubTrendingError(SourcePayloadError):
+    """The page no longer looks like GitHub Trending.
+
+    Kept as a name rather than folded away: it is the one adapter error anyone has ever
+    grepped for. It now subclasses the shared hierarchy, so `isinstance(exc, AdapterError)`
+    classifies it alongside the failures the other four adapters raise -- which were bare
+    RuntimeError and ValueError, ungreppable and indistinguishable from a crash.
+    """
 
 
 class GhTrendingAdapter(Adapter):
-    name = "gh_trending"
+    kind = "gh_trending"
 
     async def fetch(self, client: httpx.AsyncClient, source: Source) -> list[Item]:
         if source.url is None:  # pragma: no cover -- the config validator forbids it
@@ -51,7 +57,7 @@ class GhTrendingAdapter(Adapter):
             # GitHub serves a 403 with an HTML body to clients it dislikes. That body parses
             # perfectly well and yields zero rows, so without this check a block would look
             # exactly like a quiet day.
-            raise GitHubTrendingError(
+            raise SourceBlockedError(
                 f"{source.name}: {source.url} returned 403 -- GitHub is blocking this "
                 f"client. Check the User-Agent (DIGEST_USER_AGENT) and back off; do not "
                 f"retry in a tight loop."
@@ -59,8 +65,6 @@ class GhTrendingAdapter(Adapter):
         response.raise_for_status()
 
         items = parse_trending(response.text, source.name, source.url)
-        if source.fetch_limit is not None:
-            items = items[: source.fetch_limit]
         return items
 
 
@@ -112,12 +116,16 @@ def _item_from_row(row: Node, source_name: str) -> Item | None:
         # The trending page carries no date. Nullable by design rather than faked with
         # "now", which would make every repo look freshly published to the recency bonus.
         published_at=None,
+        # Synthesised rather than a source payload -- there is no JSON here to keep verbatim,
+        # so this is the closest thing to one. It carries only what the page said.
+        # Deliberately NOT a `scraped_at` timestamp: `first_seen_at` is the column that owns
+        # "when we saw this" (PLAN.md section 4), and putting our own clock inside `raw` both
+        # duplicated it and made the row non-reproducible from a fixed fixture.
         raw={
             "full_name": full_name,
             "description": description,
             "language": _text(row.css_first(SELECTOR_LANGUAGE)) or None,
             "stars_today": _stars_today(row),
-            "scraped_at": datetime.now(tz=UTC).isoformat(),
         },
     )
 
@@ -125,7 +133,7 @@ def _item_from_row(row: Node, source_name: str) -> Item | None:
 def _text(node: Node | None) -> str:
     if node is None:
         return ""
-    return _WHITESPACE.sub(" ", node.text(strip=True)).strip()
+    return normalise_title(node.text(strip=True))
 
 
 def _stars_today(row: Node) -> int | None:

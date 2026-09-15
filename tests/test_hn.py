@@ -48,12 +48,13 @@ from urllib.parse import parse_qs
 import httpx
 import pytest
 
-from digest.adapters.hn import LOOKBACK_HOURS, HNAdapter, build_request
+from digest.adapters.base import Adapter
+from digest.adapters.hn import REQUEST_WINDOW_HOURS, HNAdapter, build_request
 from digest.cli import main
-from digest.config import Config, Source, load_config
-from digest.fetch import ADAPTERS, fetch_all
+from digest.config import Config, Source
+from digest.fetch import DEFAULT_USER_AGENT, fetch_all, user_agent
 from digest.models import Item
-from tests.conftest import NetworkAccessInTestError
+from tests.conftest import NetworkAccessInTestError, load_repo_config
 
 FIXTURES = Path(__file__).parent / "fixtures"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -65,7 +66,7 @@ ASK_HN = json.loads((FIXTURES / "hn_ask_hn_null_url.json").read_text(encoding="u
 @pytest.fixture
 def hn_source() -> Source:
     """The real `hn` entry from sources.yaml -- tests the shipped config, not a stand-in."""
-    return load_config(REPO_ROOT).sources.by_name("hn")
+    return load_repo_config().sources.by_name("hn")
 
 
 def _mock_transport(payload: dict, captured: list[httpx.Request] | None = None):
@@ -100,7 +101,7 @@ def test_since_ts_is_48h_back_not_24h(hn_source):
 
     assert actual == now - timedelta(hours=48)
     assert actual != now - timedelta(hours=24), "regressed to a 24h window"
-    assert LOOKBACK_HOURS == 48
+    assert REQUEST_WINDOW_HOURS == 48
 
 
 def test_points_threshold_survives_substitution(hn_source):
@@ -234,17 +235,17 @@ def test_empty_response_is_not_an_error(hn_source):
 # ------------------------------------------------------------------- fetch-loop resilience
 
 
-class _Exploding:
+class _Exploding(Adapter):
     """An adapter that always raises, standing in for a source having a bad day."""
 
-    name = "gh_trending"
+    kind = "gh_trending"
 
     async def fetch(self, client: httpx.AsyncClient, source: Source) -> list[Item]:
         raise httpx.ConnectError("simulated outage")
 
 
 def _config_with_enabled(*names: str) -> Config:
-    config = load_config(REPO_ROOT)
+    config = load_repo_config()
     config.sources.sources = [
         source.model_copy(update={"enabled": source.name in names})
         for source in config.sources.sources
@@ -252,8 +253,13 @@ def _config_with_enabled(*names: str) -> Config:
     return config
 
 
-def run_fetch_all(config: Config, monkeypatch, payload: dict = STORIES):
-    """Drive fetch_all with every AsyncClient it builds wired to a mock transport."""
+def run_fetch_all(config: Config, monkeypatch, payload: dict = STORIES, adapters=None):
+    """Drive fetch_all with every AsyncClient it builds wired to a mock transport.
+
+    `adapters` is injected through the public API rather than monkeypatched onto a module
+    global: `fetch_all` constructs one instance per source, so there is no registry entry to
+    swap, and the mapping merges -- naming one source leaves the rest constructing normally.
+    """
     real_client = httpx.AsyncClient
 
     def client_factory(**kwargs) -> httpx.AsyncClient:
@@ -261,24 +267,27 @@ def run_fetch_all(config: Config, monkeypatch, payload: dict = STORIES):
         return real_client(**kwargs)
 
     monkeypatch.setattr(httpx, "AsyncClient", client_factory)
-    return asyncio.run(fetch_all(config))
+    return asyncio.run(fetch_all(config, adapters=adapters))
 
 
 def test_one_failing_source_never_aborts_the_run(monkeypatch):
     """CLAUDE.md's hardest guarantee. Untested resilience works until the first outage."""
-    monkeypatch.setitem(ADAPTERS, "gh_trending", _Exploding())
-    result = run_fetch_all(_config_with_enabled("hn", "gh_trending"), monkeypatch)
-    items, health = result.items, result.health
+    result = run_fetch_all(
+        _config_with_enabled("hn", "gh_trending"),
+        monkeypatch,
+        adapters={"gh_trending": _Exploding()},
+    )
+    items = result.items
 
     assert len(items) == len(STORIES["hits"])
     assert {item.source for item in items} == {"hn"}
 
-    by_name = {record.name: record for record in health}
+    by_name = {outcome.name: outcome for outcome in result.outcomes}
     assert set(by_name) == {"hn", "gh_trending"}
-    assert by_name["hn"].consecutive_failures == 0
-    assert by_name["hn"].last_success_at is not None
-    assert by_name["gh_trending"].consecutive_failures == 1
-    assert by_name["gh_trending"].last_success_at is None
+    assert by_name["hn"].succeeded
+    assert by_name["hn"].succeeded_at is not None
+    assert not by_name["gh_trending"].succeeded
+    assert by_name["gh_trending"].failed_at is not None
 
 
 def test_http_error_is_caught_not_raised(monkeypatch):
@@ -294,31 +303,29 @@ def test_http_error_is_caught_not_raised(monkeypatch):
         lambda **kw: real_client(**{**kw, "transport": httpx.MockTransport(handler)}),
     )
     result = asyncio.run(fetch_all(_config_with_enabled("hn")))
-    items, health = result.items, result.health
 
-    assert items == []
-    assert health[0].consecutive_failures == 1
+    assert result.items == []
+    assert not result.outcomes[0].succeeded
 
 
 def test_enabled_source_without_an_adapter_is_a_recorded_failure(monkeypatch):
     """Not a silent skip: that would look identical to a source returning nothing."""
     result = run_fetch_all(_config_with_enabled("arxiv_cs_ai"), monkeypatch)
-    items, health = result.items, result.health
 
-    assert items == []
-    assert [record.name for record in health] == ["arxiv_cs_ai"]
-    assert health[0].consecutive_failures == 1
+    assert result.items == []
+    assert [outcome.name for outcome in result.outcomes] == ["arxiv_cs_ai"]
+    assert not result.outcomes[0].succeeded
 
 
-def test_disabled_sources_get_no_health_record(monkeypatch):
+def test_disabled_sources_get_no_outcome(monkeypatch):
     """sources.yaml is the single source of truth for whether a source runs."""
-    health = run_fetch_all(_config_with_enabled("hn"), monkeypatch).health
-    assert [record.name for record in health] == ["hn"]
+    outcomes = run_fetch_all(_config_with_enabled("hn"), monkeypatch).outcomes
+    assert [outcome.name for outcome in outcomes] == ["hn"]
 
 
 def test_no_enabled_sources_is_not_a_crash(monkeypatch):
     result = run_fetch_all(_config_with_enabled(), monkeypatch)
-    assert (result.items, result.health, result.durations) == ([], [], {})
+    assert (result.items, result.outcomes, result.durations) == ([], [], {})
 
 
 # --------------------------------------------------------------------------- the CLI path
@@ -328,7 +335,7 @@ def test_cli_fetch_prints_items_and_health_footer(monkeypatch, capsys, tmp_path)
     # hn only. Phase 3a enabled all five sources, and without this the mocked HN payload
     # would be served to four adapters that correctly reject it -- the test would still
     # pass, but for the wrong reason.
-    monkeypatch.setattr("digest.cli.load_config", lambda _: _config_with_enabled("hn"))
+    monkeypatch.setattr("digest.cli.load_config", lambda *a, **k: _config_with_enabled("hn"))
     real_client = httpx.AsyncClient
     monkeypatch.setattr(
         httpx,
@@ -341,15 +348,18 @@ def test_cli_fetch_prints_items_and_health_footer(monkeypatch, capsys, tmp_path)
     out = capsys.readouterr().out
     lines = out.splitlines()
     assert len(STORIES["hits"]) == sum(line.startswith("[hn] ") for line in lines)
-    assert f"fetched {len(STORIES['hits'])}, new {len(STORIES['hits'])}, dupes 0" in out
+    assert f"fetched {len(STORIES['hits'])}, inserted {len(STORIES['hits'])}, dupes 0" in out
     assert "hn" in out and "ok" in out
 
 
 def test_cli_fetch_survives_a_dead_source(monkeypatch, capsys, tmp_path):
     """The footer has to *say* a source failed -- silence is how a dead feed rots unnoticed."""
-    monkeypatch.setitem(ADAPTERS, "gh_trending", _Exploding())
     monkeypatch.setattr(
-        "digest.cli.load_config", lambda _: _config_with_enabled("hn", "gh_trending")
+        "digest.cli.load_config", lambda *a, **k: _config_with_enabled("hn", "gh_trending")
+    )
+    monkeypatch.setattr(
+        "digest.cli.fetch_all",
+        lambda config, **kw: fetch_all(config, adapters={"gh_trending": _Exploding()}),
     )
     real_client = httpx.AsyncClient
     monkeypatch.setattr(
@@ -397,3 +407,43 @@ def test_the_network_guard_still_allows_loopback():
 
 async def _trivial_coroutine() -> int:
     return 42
+
+
+def test_a_real_user_agent_is_sent_on_every_request(monkeypatch):
+    """CLAUDE.md hard constraint, previously invisible in 178 tests.
+
+    `MockTransport` does not care what headers arrive, so dropping `headers=` from
+    `fetch_all`'s client construction broke nothing in the suite. The first symptom would be
+    `gh_trending` returning 403 at 07:00 -- the exact failure its own error message tells you
+    to check the User-Agent for -- and Reddit, next in PLAN section 2 Tier 2, throttles
+    default agents the same way.
+    """
+    captured: list[httpx.Request] = []
+    real_client = httpx.AsyncClient
+
+    def client_factory(**kwargs) -> httpx.AsyncClient:
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.append(request)
+            return httpx.Response(200, json=STORIES)
+
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_client(**kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client_factory)
+    asyncio.run(fetch_all(_config_with_enabled("hn")))
+
+    assert captured, "no request was made"
+    agent = captured[0].headers.get("user-agent", "")
+    assert agent == user_agent()
+    assert agent
+    assert "python-httpx" not in agent.lower(), "httpx's default UA is what gets throttled"
+    assert "AI-news" in agent
+
+
+def test_the_user_agent_is_overridable_from_the_environment(monkeypatch):
+    """`.env.example` documents DIGEST_USER_AGENT; nothing asserted it was read."""
+    monkeypatch.setenv("DIGEST_USER_AGENT", "custom-agent/9.9 (+contact)")
+    assert user_agent() == "custom-agent/9.9 (+contact)"
+
+    monkeypatch.delenv("DIGEST_USER_AGENT", raising=False)
+    assert user_agent() == DEFAULT_USER_AGENT

@@ -109,5 +109,11 @@ hard_rules:
   - always_include: [github releases of watched repos, official pricing or rate-limit changes]
   - max_items_per_digest: 20
   - max_summarised: 8
+  # Resolved into the hn source URL at config load, so the floor is stated once here and
+  # filtered server-side. Not a post-fetch filter: stories below it never arrive.
   - min_hn_points: 100
+  # SELECTION: how old an item may be and still reach a digest. Distinct from the two
+  # ingest windows it shares the value 48 with -- adapters/hn.py REQUEST_WINDOW_HOURS
+  # (the request; old items never arrive) and adapters/ai_blogs.py INGEST_MAX_AGE_DAYS
+  # (after parsing; old entries arrive but are not stored). Three stages, three names.
   - max_age_hours: 48
