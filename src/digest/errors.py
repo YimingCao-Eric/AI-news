@@ -105,11 +105,12 @@ def unmappable_entry(
     came from a live feed rather than a fixture it was gone by the time you looked.
 
     The whole feed still fails, deliberately. Skipping the bad entry and counting it would be
-    kinder, but three of the five adapters have no `drain_notes` channel to report the count
-    through, so the skip would be visible in two places and silent in three -- a silent drop
-    in exactly the spots nobody can see. That trade flips once DUP-5 gives every adapter a
-    notes channel; until then, loud and disproportionate beats quiet and proportionate.
-    See docs/reviews/found-during-r3.md.
+    kinder, but only the two bundle adapters have anything to report the count *through*: all
+    five inherit `drain_notes` from `Adapter`, and `hn`, `hf_papers` and `gh_trending` keep no
+    `_notes` list and append to nothing. So the skip would be visible in two places and silent
+    in three -- a silent drop in exactly the spots nobody can see. That trade flips once DUP-5
+    gives every adapter a populated notes channel; until then, loud and disproportionate beats
+    quiet and proportionate. See docs/reviews/found-during-r3.md (R3-3).
     """
     where = f"{source_name}/{feed_name}" if feed_name else source_name
     return SourcePayloadError(

@@ -40,6 +40,13 @@ DEFAULT_DB_FILENAME = "digest.db"
 # actionable: 4 means the environment failed and tomorrow may work, so retry; 70 means the
 # program's own assumptions are broken, so retrying cannot help and a human must look. It
 # should never occur in production at all.
+#
+# ⚠️ These six are also a table in README.md, which is the surface a scheduler is configured
+# from. Change one here and change it there in the same commit -- a scheduler acting on a
+# code we no longer emit fails in the one direction this project cannot see: silently, at
+# 07:00, on a machine nobody is watching. `tests/test_unattended_signals.py` pins which
+# situation produces which constant, and that they stay distinct -- it does not pin the
+# numbers, and nothing can pin the prose. Hence a reminder at the point of change.
 EXIT_OK = 0
 EXIT_USAGE_OR_CONFIG = 2
 EXIT_STORAGE = 3
@@ -79,7 +86,15 @@ def _db_path(args: argparse.Namespace) -> Path:
 
 
 def _run_fetch(config: Config, args: argparse.Namespace) -> int:
-    """Fetch every enabled source, persist what is new, and report."""
+    """Fetch every enabled source, persist what is new, and report.
+
+    ⚠️ **The pipeline's composition lives here, in an argparse handler** (LC-3, deferred in
+    docs/reviews/triage.md). Two stages fit; the orchestrator was left for the moment there
+    are three to compose, since building it now would only mean rewiring it then. **Trigger:
+    3c.** If you are adding a stage to this function, that is the cue — `digest run` has to
+    call the same composition `digest fetch` does, and the cheapest way to get two that
+    disagree is to write the sequence twice.
+    """
     result = asyncio.run(fetch_all(config))
 
     for item in result.items:
@@ -138,6 +153,15 @@ def _run_render(config: Config, args: argparse.Namespace) -> int:
     Plain text for now; the jinja2 Markdown template is phase 3c, which is also when
     `store.stamp_digest_date` gets wired in. Until then this is deliberately non-destructive
     -- running it does not consume the items.
+
+    ⚠️ **Nothing tests this function end to end** (TS-2, deferred in docs/reviews/triage.md,
+    trigger: 3c, which rewrites it). That is not theoretical: a Theme 3 edit to the
+    `_health_summary` call below silently failed to apply, and `digest render` printed
+    `quiet` for a disabled source for a whole theme, because the test that would have caught
+    it called `_health_summary` directly with the argument this line was missing. **When 3c
+    lands the tests it owes, at least one must drive `main(["render", ...])`** -- a test that
+    supplies the argument cannot prove the caller supplies it. See CLAUDE.md's conventions
+    and docs/reviews/found-during-r3.md (R3-2).
     """
     # `create=False`: sqlite3 will happily invent a database for any path, so a typo'd
     # --db used to yield a brand-new file and a confident "Nothing new" -- the failure and
@@ -264,6 +288,11 @@ def _health_summary(
     Partial failure exits 0 by design, which makes this footer the only carrier of "three of
     five sources died". Phase 5's delivery channel has to include it, not just the items, or
     the reasoning that makes 0 correct here makes partial failure invisible there.
+
+    ⚠️ These five states are also described in README.md, under "Reading the footer" -- that
+    is what tells a half-awake reader that `quiet` is not `disabled`. Add, rename or merge a
+    state here and update that section in the same commit. 3c rewrites this footer for
+    Markdown; the states are the contract, the layout is not.
     """
     counts: dict[str, int] = {}
     for item in items:

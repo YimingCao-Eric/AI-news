@@ -71,7 +71,7 @@ def snapshot_now() -> datetime:
 
     Derived from the manifest rather than hardcoded, because it is a property of the
     *fixtures*, not of the project. `ai_blogs` filters entries against
-    `now - MAX_ENTRY_AGE_DAYS`, so a constant frozen at one date would push every entry
+    `now - INGEST_MAX_AGE_DAYS`, so a constant frozen at one date would push every entry
     outside the cutoff once the fixtures were refreshed -- yielding a snapshot of nothing,
     produced by a test that passes. Re-recording now updates the clock as a side effect.
     """

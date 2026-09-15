@@ -39,8 +39,13 @@ SINCE_TS_PLACEHOLDER = "{since_ts}"
 #: must not be merged: this is how far back we ingest, `max_age_hours` is how old an item may
 #: be and still be selected into a digest. They are meant to be able to diverge -- fetching
 #: 72h while selecting 48h is a reasonable thing to want once slow-burner behaviour is
-#: understood. The right phase 3 move is an assertion that this is >= max_age_hours, never a
-#: merge; collapsing them silently undoes the slow-burner fix above.
+#: understood. The right move is an assertion that this is >= max_age_hours, never a merge;
+#: collapsing them silently undoes the slow-burner fix above.
+#:
+#: **Owed by phase 3b (LC-6, deferred in docs/reviews/triage.md).** Written as "the right
+#: phase 3 move" while phase 3 was ahead of us; 3a shipped without it, so the instruction had
+#: quietly become a description of something that already should have happened. The assertion
+#: belongs wherever `max_age_hours` is first read for selection.
 REQUEST_WINDOW_HOURS = 48
 
 #: Any leftover `{...}` after substitution means a typo'd placeholder in sources.yaml.

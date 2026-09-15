@@ -143,20 +143,51 @@ what shipped. §7 is a record of intent at a point in time, and in a project who
 is two correct decisions interacting, its value is preserving what was believed before the code taught
 otherwise. Append a dated amendment; never overwrite.
 
+**Applied 2026-09-15.** All rows above are done. The guard generalised into a rule that is now
+stated in PLAN §7.1, because it has to be usable by someone who was not in the conversation:
+*a record of intent gets an amendment; a catalogue of measurements gets a correction.* §7 and
+§3's intentions were amended and dated; §2's counts were corrected **and dated on both sides**,
+since a number without a date reads as a constant and that is precisely how the arXiv row
+misled — 50 items measured once became a threshold, and the real figure moves between 16 and
+270 depending on the category and the day. `base.py` and README are neither kind of record:
+they describe what is true now, so they were rewritten.
+
+Theme 7 also swept for drift the earlier six themes created. Found and fixed: `base.py`
+stating that `kind` is "free-form text" when Theme 5 made it the required dispatch key;
+`hn.py` calling the ingest-window assertion "the right phase 3 move" after phase 3a had
+shipped without it; `sources.yaml` still naming `LOOKBACK_HOURS`; `errors.py` and a test
+docstring still saying three adapters have no notes *channel*; a test named
+`test_304_is_no_unrendered_items_not_an_error`, where Theme 6's `new` → `unrendered` rename
+landed on a 304 — which means no new *entries* and has nothing to do with rendering; and
+`MAX_ENTRY_AGE_DAYS` surviving in the fixture manifest and in `found-during-r3.md` itself.
+
 ---
 
 ## Deferred, with triggers
 
-| Item | Trigger |
-|---|---|
-| Bundle extraction (DUP-1, DUP-5) | The third RSS bundle adapter |
-| Orchestrator module (LC-3) | 3c, composing the third stage |
-| Run provenance / `runs` table (SF-4, SF-5) | Phase 4 |
-| Timeout-expiry test (TS-6) | Next change to timeout handling |
-| `render` tests (TS-2) | 3c |
-| Result-type naming (VN-7) | A fourth result type |
-| 429 backoff behaviour (DD-3) | First 429, or adding Reddit |
-| Ingest-window assertion (LC-6) | 3b (already owed) |
+**Third column added by Theme 7 (2026-09-15).** A trigger recorded only here fires only if
+someone rereads this file, which is the one thing you cannot schedule. Each row below is now
+also written where the work would actually be done — a docstring, a constant, a config
+comment — so the trigger reaches whoever is editing that code whether or not they came from
+here. This table stays the index; the planted copies are the mechanism.
+
+| Item | Trigger | Planted in |
+|---|---|---|
+| Bundle extraction (DUP-1, DUP-5) | The third RSS bundle adapter | `adapters/_mapping.py` module docstring |
+| Orchestrator module (LC-3) | 3c, composing the third stage | `cli.py::_run_fetch` docstring |
+| Run provenance / `runs` table (SF-4, SF-5) | Phase 4 | `models.py::SourceOutcome.expected_failure` |
+| Timeout-expiry test (TS-6) | Next change to timeout handling | `fetch.py::SOURCE_TIMEOUT_SECONDS` |
+| `render` tests driving `main()` (TS-2) | 3c | `cli.py::_run_render` docstring |
+| Result-type naming (VN-7) | A fourth result type | `models.py::SourceOutcome.expected_failure` |
+| 429 backoff behaviour (DD-3) | First 429, or adding Reddit | CLAUDE.md, "Not yet implemented" |
+| Conditional-GET validators (DD-7) | A host rate-limiting us | PLAN §3; `ai_blogs.conditional_headers`; `test_conditional_headers_are_empty_until_validators_are_persisted` |
+| Ingest-window assertion (LC-6) | 3b (already owed) | `adapters/hn.py::REQUEST_WINDOW_HOURS` |
+| Per-source fixture `captured_at` (R3-1) | Any edit to `record_fixtures.py` | `scripts/record_fixtures.py::write_manifest` |
+| Skip-and-count unmappable entries (R3-3) | DUP-5, or the first real mapping failure | `errors.py::unmappable_entry` |
+
+DD-7 joined this table in Theme 7: PLAN §3 mandated conditional GET on every RSS source and
+nothing recorded that it had been half-built and stopped, which made it a silent obligation
+rather than a deferred one.
 
 ## Won't fix
 

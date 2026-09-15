@@ -82,17 +82,55 @@ anti-keywords, daily quota). Your original `interests.md` is untouched; merge wh
 Verified 2026-09-12 unless marked. "Verify" means I confirmed the endpoint returns the expected
 content; unmarked rows are standard, well-known feed URLs you should HEAD-check on day one.
 
+**This section is a log of observations, so every number in it carries the date it was taken.**
+A count without a date reads as a constant, and then a genuinely quiet Sunday looks like a
+broken adapter — which is the mistake the arXiv row below caused once already. Volumes vary by
+weekday, holiday and category; when you re-measure, add a line rather than replacing one.
+
 ### Tier 1 — build against these first (5 sources, one per topic)
 
 | Source | Endpoint | Notes |
 |---|---|---|
 | Hacker News front page | `https://hn.algolia.com/api/v1/search?tags=front_page` | ✅ verified. JSON, no key, no scraping. Fields: `title`, `url`, `points`, `num_comments`, `created_at`, `objectID`. Use `search_by_date` with `tags=story&numericFilters=points>100` for a cleaner daily cut |
-| GitHub Trending | Scrape `https://github.com/trending?since=daily&spoken_language_code=en` — or the per-language variants | No official API, never has been. The HTML is stable; a 30-line BeautifulSoup parse. Alternatives if you'd rather not scrape: `mshibanami/GitHubTrendingRSS` (prebuilt RSS per language), `vitalets/github-trending-repos` (GitHub issue notifications) |
+| GitHub Trending | Scrape `https://github.com/trending?since=daily&spoken_language_code=en` — or the per-language variants | No official API, never has been. The HTML is stable; a 30-line parse with **selectolax** (corrected 2026-09-15 from "BeautifulSoup" — CLAUDE.md fixes the stack on selectolax and forbids adding a dependency, so this line would have had you install one). Alternatives if you'd rather not scrape: `mshibanami/GitHubTrendingRSS` (prebuilt RSS per language), `vitalets/github-trending-repos` (GitHub issue notifications) |
 | Hugging Face daily papers | `https://huggingface.co/api/daily_papers` | ✅ verified. JSON; per item `paper.{id,title,summary,authors}`, `publishedAt`, `numComments`, `submittedBy`, `organization`. This is the curated feed — far better signal than raw new-model listings |
-| AI company blogs (bundle) | `https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_<name>.xml` | ✅ verified (Anthropic news feed parses as RSS 2.0 — **check freshness**, the copy I fetched topped out at 2026-07-14). Repo regenerates hourly via Actions and covers Anthropic news/research/engineering, Meta AI, Mistral, Cohere, xAI, Google AI. Saves you writing five scrapers |
-| arXiv cs.AI | `https://rss.arxiv.org/rss/cs.AI` | ✅ verified — 50 items, same-day (2026-09-12). Also `cs.CL` (NLP), `cs.MA` (multi-agent). High volume: quota this hard or filter by keyword before it reaches the ranker |
+| AI company blogs (bundle) | Official feeds first; `https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_<name>.xml` where none exists | ✅ verified. **Freshness checked 2026-09-14** — the instruction below is discharged, see the log. Repo regenerates hourly via Actions; feed quality is per-feed, not per-mirror. Saves you writing five scrapers. Live list is `sources.yaml` |
+| arXiv cs.AI | `https://rss.arxiv.org/rss/cs.AI` | ✅ verified. Also `cs.CL` (NLP), `cs.MA` (multi-agent) — all three are subscribed. Volume is much higher than first measured; see the log. Quota this hard or filter by keyword before it reaches the ranker |
 
 That's enough to build the whole pipeline end to end. **Do not add source six until phase 3 works.**
+
+### Volume and freshness observed — a log, not a table of constants
+
+**2026-09-12** (first look, cs.AI only): arXiv cs.AI RSS returned **50 items**, same-day.
+
+**2026-09-14** (`scripts/record_fixtures.py --source all`, the recording the pipeline snapshot
+is still built from — `tests/fixtures/manifest.json` carries the instant):
+
+| Source | Observed | Reaching the store |
+|---|---|---|
+| arXiv | cs.AI **270** entries, cs.CL **115**, cs.MA **16** | 209 after the announce filter |
+| `ai_blogs` | 6 feeds, 1824 entries total (openai_news 1193, anthropic_news 257, claude 237, deepmind 100, cursor 22, anthropic_research 15) | 112 after the 30-day ingest cutoff |
+| HF daily papers | **50** papers | 50 |
+| HN (`points>100`, 48h) | 30 hits returned, 55 matching | 30 (`fetch_limit`) |
+| GitHub Trending | **24** rows | 24 |
+
+**cs.AI at 270 is 5.4× the 50 recorded two days earlier, and that is the point of dating
+these.** arXiv volume genuinely swings — weekday against weekend, holidays, and per category
+(cs.MA is 16 on the same morning cs.AI is 270). Roughly 38% of that 270 was `replace` /
+`replace-cross`, i.e. v2 revisions rather than new work, which the adapter filters out; so
+"how many entries arrived" and "how many are new work" are two different numbers and the
+gap moves too. **Do not treat any of these as a threshold.** If you see 180 cs.AI entries on
+a Sunday, that is a Sunday, not a fault — the thing that would indicate a fault is
+`0 new/cross of 270`, which the adapter reports with its denominator for exactly this reason.
+
+**Freshness, same date** — this is what discharged the "check freshness" instruction above,
+and the finding was not the one expected: the Olshansk mirror is not uniformly stale, it is
+stale **per feed**. Both official feeds were fresh; three of four mirror feeds were months
+old *while returning HTTP 200 with well-formed XML*. Dropped that morning:
+`anthropic_engineering` (112d), `meta_ai` (49d), `mistral` (115d); every alternative checked
+returned 404, so the replacements come from the same mirror. Hence per-feed
+`stale_after_days` in `sources.yaml` rather than one global number, and hence the STALE line
+in the run summary: these feeds do not fail, they go quiet, and nothing else would say so.
 
 ### Tier 2 — add once the pipeline is proven
 
@@ -135,6 +173,12 @@ fetch → normalise → dedupe/store → rank → summarise → render → deliv
 
 - **fetch**: per-source adapter, returns raw payloads. Only this layer touches the network.
   Conditional GET (`If-None-Match` / `If-Modified-Since`) on every RSS source; cache the ETag.
+  **Amended 2026-09-15 — not implemented, and deliberately so.** `ai_blogs` builds the headers
+  and handles 304 (both tested); nothing stores the validators, so every request goes out
+  unconditional, and `arxiv` does not do it at all. Caching the ETag needs a `feed_state`
+  table: the `sources` row has one `etag` column and `ai_blogs` has six feeds, which is the
+  detail this line did not foresee. The payoff is politeness, not speed, on six small files
+  fetched once a day. Trigger: a host rate-limiting us. Tracked as DD-7.
 - **normalise**: maps each source's shape into one `Item`. Every adapter's only job.
 - **dedupe/store**: canonicalise the URL (strip `utm_*`, trailing slash, `?ref=`), hash it, insert
   with `INSERT OR IGNORE`. Also catch the same story from three outlets: near-duplicate title match
@@ -145,7 +189,8 @@ fetch → normalise → dedupe/store → rank → summarise → render → deliv
 - **render**: Markdown first; HTML later if you want it pretty.
 - **deliver**: file → then push/email.
 
-**Language/stack:** Python 3.12, `httpx` (async), `feedparser`, `selectolax` or `beautifulsoup4`,
+**Language/stack:** Python 3.12, `httpx` (async), `feedparser`, `selectolax` *(chosen over
+`beautifulsoup4` in phase 0; CLAUDE.md now fixes the stack and forbids substitutions)*,
 `pydantic` v2 for `Item`, SQLite via stdlib `sqlite3` (do **not** reach for SQLAlchemy here — the JHA
 async-SQLAlchemy/asyncpg pain you already hit is not worth re-importing for a single-table script),
 `jinja2` for rendering, `uv` for deps. One process, no queue, no server.
@@ -197,10 +242,35 @@ CREATE TABLE sources (
   reads is worse than an absent one: eventually something reads it and the two disagree. If
   auto-disable-after-N-failures ever ships it arrives as `auto_disabled_at`, a name that
   cannot be mistaken for config intent.
-- `digest_date` is what defines "new": `new_items()` selects `digest_date IS NULL`, never a
-  comparison against today's date. `first_seen_at` is UTC while the digest day is
+- `digest_date` is what defines "new": `unrendered_items()` selects `digest_date IS NULL`,
+  never a comparison against today's date. `first_seen_at` is UTC while the digest day is
   America/Vancouver, so a 07:00 local run at 14:00 UTC would split one morning across two UTC
   days; and a missed run would lose those items permanently instead of catching up.
+  *(Named `new_items()` here until 2026-09-15: "new" also named the count of rows written this
+  run, and the two routinely disagree while both being correct. `insert_items` returns the
+  other one.)*
+
+**Amended 2026-09-15 — schema v2, and how the schema changes from here.**
+
+The `sources` row gained `last_failure_at` and `total_failures`, because the counters above
+destroy a feed's history the moment it recovers: a source that fails every other morning
+reads as perfectly healthy every time you look at it. `total_failures` only counts from v2
+onward, so a back-filled row can show a total *below* its consecutive count; the footer
+prints `total=≥N` in that case rather than inventing a number, and the marker disappears on
+its own once the true count overtakes.
+
+Two rules that arrived with it:
+
+- **`SCHEMA_VERSION` + `_MIGRATIONS` in `store.py`, keyed by the version migrated *from*,**
+  applied in one explicit `BEGIN`/`COMMIT`. A database written by a newer schema is refused
+  rather than opened, since this file is meant to be committed from a GitHub Action and a
+  half-upgraded database is worse than a missing one. No Alembic — CLAUDE.md forbids it and a
+  dict of DDL strings is the whole feature at this size.
+- **`tests/fixtures/schema_v1.sql` is frozen and append-only.** It was extracted from git
+  history, not regenerated, and it is the only proof the migration runs against a real v1
+  database rather than against today's DDL with the new columns removed. Regenerating it from
+  the current schema would make the migration test pass by construction while testing nothing.
+  Add `schema_v2.sql` when v3 lands; never edit v1.
 
 Keeping `raw_json` is the single most useful decision in this schema: when you change the ranker in
 week 3 you can re-score three weeks of history offline instead of waiting three weeks to see if the
@@ -301,11 +371,22 @@ weekend, 4–5 over the following two weeks, 6+ only if you still want it.
 ### Phase 1 — One source, end to end (2 hours)
 - Hacker News only. Fetch → `Item` → print titles. No database yet.
 - **Done when:** `digest fetch --source hn` prints 30 titles with links.
+- *Amended 2026-09-15: there is no `--source` flag and never was.* Which sources run is
+  `enabled` in `sources.yaml` — one place that answers the question for the scheduled 07:00
+  run and for you at a prompt, rather than two that can disagree. `digest fetch` did print 30
+  titles with links, and the phase is done. A flag may still arrive for one-source debugging;
+  if it does it must narrow a run, never define one.
 
 ### Phase 2 — Store and dedupe (2 hours)
 - SQLite schema, canonical-URL hashing, `INSERT OR IGNORE`, `first_seen_at`.
 - **Done when:** running it twice in a row inserts zero rows the second time, and
   `digest render` outputs only items first seen today.
+- *Amended 2026-09-15: the second clause was replaced during the phase, not missed.* `render`
+  outputs items whose `digest_date IS NULL` — never shown before — not items first seen today.
+  Two reasons, both found by writing it: `first_seen_at` is UTC while the digest day is
+  America/Vancouver, so a 07:00 local run splits one morning across two UTC days; and a
+  missed run would silently lose a day's items instead of catching up the next morning. §4
+  carries the same correction. The first clause holds and is tested.
 
 ### Phase 3 — Five sources, rule ranking, Markdown out (a weekend)
 - Add GitHub Trending, HF daily papers, the AI-blogs bundle, arXiv cs.AI.
@@ -317,6 +398,14 @@ weekend, 4–5 over the following two weeks, 6+ only if you still want it.
   the plan and the easiest to skip. You are looking for: which sources you always skip, whether
   titles alone are enough (often they are), how many items feels right, and which of your four topics
   is actually starving.
+- *Amended 2026-09-15: this phase split into 3a / 3b / 3c, and an interphase review ran
+  between them.* **3a shipped** — five adapters, the resilient fetch loop, the health footer;
+  425 rows over the recorded fixtures. **R0–R3 then ran** (§7.1) on the grounds that four more
+  adapters had landed in a shape one adapter's design had chosen. **3b owes** rule ranking,
+  per-topic quotas, cross-source dedupe by arXiv ID (§5.1) and the
+  `REQUEST_WINDOW_HOURS >= max_age_hours` assertion (LC-6). **3c owes** the jinja2 Markdown
+  render, `stamp_digest_date`, `render` tests (TS-2) and the orchestrator (LC-3). The
+  "Done when" above belongs to 3c, and the four-morning read follows it — not 3a.
 
 ### Phase 4 — LLM ranking + summaries (matches LLM Eng week 1–2)
 - Batched structured-output ranking call over the v1 survivors.
@@ -348,6 +437,62 @@ weekend, 4–5 over the following two weeks, 6+ only if you still want it.
 - Near-duplicate clustering across outlets — **this is the shared ingestion layer with idea 04**; when
   you build it, build it in a way idea 04 can import rather than copy.
 
+### 7.1 Interphase review R0–R3 (2026-09-14 → 2026-09-15)
+
+Run between 3a and 3b, on the grounds that four adapters had landed in a shape one adapter's
+design had chosen and nothing had yet asked whether that shape survived contact.
+
+**Where it lives — `docs/reviews/`, and that is the canonical record, not this section.**
+
+| File | What it is |
+|---|---|
+| Six dimension reports | Layering, duplication, silent failure, test-suite health, vocabulary, documentation drift. Written before any fix, each forbidden from editing code |
+| `triage.md` | **The decision record.** All 54 findings, each fix-now / fix-later-with-a-trigger / won't-fix, grouped into seven themes. Read this before proposing a change to anything the review touched |
+| `found-during-r3.md` | Things noticed while applying a theme, outside that theme's scope |
+| `tests/snapshots/pipeline.txt` | R0's output: 425 rows, fetch → store over the recorded fixtures with the clock pinned. The contract every theme had to leave unchanged |
+
+**What the seven themes changed**, one line each, for orientation only:
+
+1. **Test-suite determinism** — four tests that would have gone red on a date in 2026-09-21 now pin their clock to `manifest.json`; the pinning test made load-bearing.
+2. **`SourceHealth` split** — the per-run event (`SourceOutcome`) separated from the persisted state; schema v2 adds `total_failures` / `last_failure_at` so history survives recovery (§4).
+3. **Unattended-run signals** — exit codes 0/2/3/4/70/130, the run log made visible without `-v`, `render` refusing to invent a database, and a footer whose five states are distinguishable.
+4. **Exception taxonomy** — `digest/errors.py`: `DigestControlError` outside `Exception`, `AdapterError` as a classification (never a narrowed catch), and errors that name the datum that broke.
+5. **Dispatch** — `kind` became the required dispatch key with one adapter instance per source; `known_kinds` injected into `load_config`.
+6. **Shared helpers** — one datetime invariant, one title rule, `fetch_limit` enforced once in `fetch.py`, and the two senses of "new" given separate words (`insert_items` / `unrendered_items`).
+7. **Documentation** — this section, the amendments above, README, and `adapters/base.py`.
+
+**Why §7 above carries dated amendments instead of corrections, and the general rule.**
+
+Rewriting a "Done when" line to match what shipped would erase the only evidence that the
+belief and the outcome ever differed — and in a project whose recurring bug class is two
+individually-correct decisions colliding, that gap is the most informative thing on the page.
+So:
+
+> **A record of intent gets an amendment. A catalogue of measurements gets a correction.**
+
+§7 and §3's design intentions are records: append, never overwrite. §2's counts are
+observations: correct them, and date both the old value and the new, because a number without
+a date reads as a constant. §4 sits in between and already uses the amendment shape. Code
+documentation — `base.py`, README — is neither: it describes what is true now, and stale
+prose there is a defect rather than a historical record.
+
+**Still deferred, with the trigger and where the trigger is planted.** `triage.md` holds the
+reasoning; the point of the third column is that nothing here depends on anyone rereading it.
+
+| Deferred | Trigger | Planted in |
+|---|---|---|
+| Bundle fan-out extraction (DUP-1, DUP-5) | The third RSS bundle adapter | `adapters/_mapping.py` docstring |
+| Orchestrator module (LC-3) | 3c, composing the third stage | `cli.py::_run_fetch` docstring |
+| Run provenance / `runs` table (SF-4, SF-5) | Phase 4 | `models.py::SourceOutcome.expected_failure` |
+| Timeout-expiry test (TS-6) | Next change to timeout handling | `fetch.py::SOURCE_TIMEOUT_SECONDS` |
+| `render` tests driving `main()` (TS-2) | 3c | `cli.py::_run_render` docstring |
+| Result-type naming (VN-7) | A fourth result type | `models.py::SourceOutcome.expected_failure` |
+| 429 backoff (DD-3) | First 429, or adding Reddit | CLAUDE.md, "Not yet implemented" |
+| Conditional-GET validators (DD-7) | A host rate-limiting us | §3 above; `ai_blogs.conditional_headers`; `test_conditional_headers_are_empty_until_validators_are_persisted` |
+| Ingest-window assertion (LC-6) | 3b (already owed) | `adapters/hn.py::REQUEST_WINDOW_HOURS` |
+| Per-source fixture `captured_at` (R3-1) | Any edit to the recorder | `scripts/record_fixtures.py::write_manifest` |
+| Skip-and-count unmappable entries (R3-3) | DUP-5, or the first real mapping failure | `errors.py::unmappable_entry` |
+
 ---
 
 ## 8. Testing and verification
@@ -364,6 +509,19 @@ Light, but not zero — this thing runs unattended, which is exactly where silen
   your "keeps" were in the top 8. That number is the only quality metric that matters; write it down
   each week so you can tell whether changes help.
 - **Snapshot the renderer**: one golden Markdown file so template edits don't silently break layout.
+- **The pipeline snapshot** (added by R0, 2026-09-14): `tests/snapshots/pipeline.txt` is fetch →
+  store over every recorded fixture, clock pinned to `manifest.json`'s `captured_at`, dumped as
+  425 sorted rows — url_hash, source, published_at, dupe_of, a hash of `raw`, title, url. It is
+  a *characterisation* test: it asserts nothing about what is correct, only that composition has
+  not moved, which is what makes it the contract a refactor is measured against. Every one of
+  the seven R3 themes was required to leave it byte-identical.
+  **Updating it is a two-step act, deliberately.** Regenerating with
+  `uv run python -m scripts.snapshot_pipeline` (writing is the default; `--stdout` prints
+  instead, which is the safe way to look first) is only legitimate *after* the behaviour
+  change it reflects has been agreed, and the commit message must say what moved and why. A
+  regenerated snapshot that nobody explained is a refactor with its evidence deleted. It is also
+  reproducible only against the fixture set that produced it — re-record with `--source all`, or
+  the pinned clock moves under the time-windowed adapters (see R3-1).
 
 ### 8.1 Review questions for any change
 
@@ -417,6 +575,10 @@ claim. Ask these before declaring a change done:
 2. Copy `interests.proposed.md` → `interests.yaml`, edit until the topic list and anti-topics are
    genuinely yours. Fifteen minutes here beats two days of ranker tuning later.
 3. `sources.yaml` with the five tier-1 sources, each with `name`, `kind`, `url`, `weight`, `quota`.
+   *Amended 2026-09-15: the per-source cap is `fetch_limit`, not `quota`. `quota` was reserved
+   for the per-topic cap in `interests.yaml`, because the two bound different things at
+   different stages — ingest against selection — and one word for both is how you end up
+   fetching narrowly when you meant to select narrowly.*
 4. HEAD-check all five endpoints from your own machine before writing an adapter against any of them.
 5. Build the HN adapter only. Print titles. Commit.
 6. Add SQLite + dedupe. Run twice, confirm zero new rows. Commit.

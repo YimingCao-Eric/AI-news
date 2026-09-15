@@ -6,6 +6,11 @@ summarise the top slice → render one Markdown page I read each morning.
 Full design in `docs/PLAN.md`. Interest profile in `docs/interests.md`. Read both before
 making design decisions; do not re-derive the architecture.
 
+`docs/reviews/` holds the interphase review (R0–R3, 2026-09-14/15): six dimension reports,
+`triage.md` deciding all 54 findings, and `found-during-r3.md`. **Check `triage.md` before
+proposing a change to anything the review touched** — a good idea deferred with a stated
+trigger is already decided, and re-litigating it costs a session. PLAN §7.1 is the index.
+
 ## Stack — fixed, do not substitute
 
 - Python 3.12, managed with `uv`. Entry point: `digest` CLI.
@@ -74,8 +79,21 @@ test went silently online the moment `digest fetch` grew a real implementation u
 - Never let one failing source abort a run. Catch per-source, record the failure, continue.
 - Never sort the Hugging Face models API by `createdAt` (thousands of junk uploads daily) —
 use `trendingScore`.
-- Set a real User-Agent on every outbound request. Back off on 429.
+- Set a real User-Agent on every outbound request. (`fetch.user_agent()`, overridable with
+`$DIGEST_USER_AGENT`; `test_a_real_user_agent_is_sent_on_every_request` pins it.)
 - Don't fetch or summarise full article bodies. Titles and feed summaries only.
+
+### Not yet implemented — constraints that are still intentions
+
+Everything above describes what the code does today. These two do not, and they sat in the
+list above unmarked, which is worse than absent: a constraint reads as a description of
+current behaviour, so the next person builds on it. Implement them when their trigger fires;
+until then, do not assume they hold.
+
+| Intention | State today | Trigger |
+|---|---|---|
+| **Back off on 429** | Nothing anywhere retries or sleeps. A 429 raises `SourceBlockedError` and that source is simply lost for the day — correct, but not backoff. | The first 429 we actually see, or adding Reddit, which throttles hard and is next in Tier 2 |
+| **Conditional GET on RSS** | Half-built, in `ai_blogs` only: `conditional_headers()` and the 304 path are real and tested, but no validators are stored, so every request goes out unconditional. `arxiv` does not do it at all. | A host rate-limiting us. Needs a `feed_state` table — one `sources.etag` column cannot hold six feeds |
 
 
 
@@ -83,11 +101,23 @@ use `trendingScore`.
 
 fetch → normalise → store → rank → summarise → render → deliver
 
-- `adapters/` only fetch and map to `Item`. No scoring, no DB, no LLM.
+Built (phase 3a):
+
+- `adapters/` only fetch and map to `Item`. No scoring, no DB, no LLM, no printing — and no
+enforcing of `fetch_limit`, which `fetch.py` applies once to every adapter's output. The
+full contract is `adapters/base.py`; read it before adding a source.
+- `fetch.py` runs the sources concurrently and never lets one abort the run. It touches no
+database — `cli.py` moves items from one to the other.
 - `store.py` only reads/writes SQLite. No business logic.
-- `rank.py` is a pure function: (items, profile) -> scored items. No I/O.
-- `summarise.py` is the only module allowed to call an LLM.
-- `render.py` only turns selected items into text via a jinja2 template.
+- `cli.py` owns every line a human sees, and today also owns composition (LC-3: the
+orchestrator arrives in 3c, when there are three stages to compose).
+
+Planned — **these modules do not exist yet**; the rule is what they must be when written:
+
+- `rank.py` will be a pure function: (items, profile) -> scored items. No I/O.
+- `summarise.py` will be the only module allowed to call an LLM.
+- `render.py` will only turn selected items into text via a jinja2 template. (`digest
+render` exists as a plain-text printer inside `cli.py` until then.)
 
 
 
@@ -113,6 +143,15 @@ code works. `test_the_numeric_guard_is_load_bearing` asserts Dice alone would ca
 "RTX 5090" and "RTX 5080" duplicates, so deleting the guard produces an explanation rather
 than silence. Phase 3b wants the same shape for the per-topic quotas: a test showing the
 games section vanishes under 200 AI items when quotas are removed.
+- **A test that supplies the argument cannot prove the caller supplies it.** When a change
+adds a parameter, a call site, or a stage, at least one test must drive the **entry point**
+— `main([...])`, `fetch_all(config)` — and not the helper. This is not a style preference:
+`test_the_footer_distinguishes_every_source_state` called `_health_summary(..., enabled=...)`
+directly and passed for a whole theme while one of the two real call sites never passed
+`enabled` at all, so `digest render` mislabelled disabled sources as `quiet` the entire time.
+The helper was correct; nothing looked at the wiring. Helper tests stay worth writing — they
+are simply not evidence about callers, and almost every helper in this codebase is currently
+tested that way.
 
 
 

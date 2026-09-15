@@ -31,7 +31,7 @@ sources:
     # Either one surviving unresolved is caught by hn.build_request, which refuses to ship
     # a literal brace to Algolia.
     # {since_ts} is a unix timestamp the adapter computes at fetch time: now - 48h
-    # (adapters/hn.py LOOKBACK_HOURS). Not 24h -- a story posted 30h ago that only crosses
+    # (adapters/hn.py REQUEST_WINDOW_HOURS). Not 24h -- a story posted 30h ago that crosses
     # 100 points this morning was never inside a 24h window on either run, so slow burners
     # would be missed permanently. Re-seeing yesterday's items is free once phase 2 dedupes
     # on url hash. The adapter finds this placeholder in the parsed query params, so moving

@@ -106,6 +106,12 @@ class SourceOutcome(BaseModel):
     #: site to the run log and the footer. Deliberately NOT persisted to the `sources` table:
     #: "which runs crashed" is run provenance, which is SF-4/SF-5 and deferred against phase
     #: 4's runs table. Visible in the run that produced it, not stored.
+    #:
+    #: Naming note (VN-7, deferred): three levels of result exist -- `FetchResult` for a run,
+    #: `SourceOutcome` for one source, `FeedOutcome` for one feed of a bundle -- across two
+    #: words, and the innermost level in `arxiv` is still an untyped tuple. **Trigger: a
+    #: fourth result type.** Adding one without settling the scheme is how you end up with
+    #: four names for one idea; settling it over three is a rename with an obvious answer.
     expected_failure: bool = False
 
     @field_validator("succeeded_at", "failed_at")

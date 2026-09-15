@@ -300,7 +300,7 @@ def test_one_quiet_feed_is_not_an_error(source, bodies):
 # -------------------------------------------------------------------------- conditional
 
 
-def test_304_is_no_unrendered_items_not_an_error(source, bodies):
+def test_304_is_no_new_entries_not_an_error(source, bodies):
     not_modified = {**bodies, source.feeds[1].url: httpx.Response(304)}
     items, notes = fetch(source, not_modified)
 

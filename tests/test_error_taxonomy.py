@@ -225,9 +225,10 @@ def test_an_unmappable_entry_names_the_entry_and_its_url():
 def test_a_bad_datum_fails_the_feed_rather_than_vanishing(monkeypatch):
     """Decision 3(a): loud and disproportionate, over quiet and proportionate.
 
-    Skipping the entry and counting it would be kinder, but three of five adapters have no
-    `drain_notes` channel to report the count through -- so the skip would be visible in two
-    places and silent in three. That trade flips when DUP-5 gives every adapter a channel.
+    Skipping the entry and counting it would be kinder, but only the two bundle adapters have
+    anything to report the count through -- all five inherit `drain_notes`, and three of them
+    append to nothing -- so the skip would be visible in two places and silent in three. That
+    trade flips when DUP-5 gives every adapter a populated channel.
     """
     from digest.adapters import hn
 

@@ -86,6 +86,14 @@ DEFAULT_USER_AGENT = "AI-news-digest/0.1 (+https://github.com/YimingCao-Eric/AI-
 #: (3 categories, 10s each) enforce their own per-feed timeouts and return partial results,
 #: because one slow feed spending the shared budget would cost you every other feed behind
 #: the same source. This remains the outer guard for a hung adapter.
+#:
+#: ⚠️ **No test exercises an expiring timeout** (TS-6, deferred in docs/reviews/triage.md):
+#: the suite proves the budget is *configured*, never that a source exceeding it is recorded
+#: as a failure rather than hanging the run. A timeout that silently stopped firing would
+#: look exactly like a fast morning. **Trigger: the next change to timeout handling here or
+#: in a bundle adapter, or the third bundle adapter -- that is this line's cue.** The test
+#: wants a fake adapter that sleeps past the budget, asserting the outcome is a recorded
+#: failure and the other sources still return.
 SOURCE_TIMEOUT_SECONDS = 20.0
 
 

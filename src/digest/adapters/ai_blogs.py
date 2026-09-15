@@ -97,7 +97,7 @@ class AIBlogsAdapter(Adapter):
         Note the deliberate naming split, which is the point of the vocabulary rule it
         follows: a long-lived object takes a `clock: Callable[[], datetime]`, because it is
         constructed once and may fetch many times; a single function call takes a
-        `now: datetime`, because it happens at one instant. `store.upsert_items(now=...)` is
+        `now: datetime`, because it happens at one instant. `store.insert_items(now=...)` is
         the latter. Same concern, two lifetimes, two names -- so the difference is visible
         rather than discovered by type error.
         """

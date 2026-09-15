@@ -37,7 +37,7 @@ ARXIV_CATEGORIES = ("cs.AI", "cs.CL", "cs.MA")
 
 #: Written on every run. The pipeline snapshot pins its clock to `captured_at` from here.
 #:
-#: This is not decoration. `ai_blogs` filters entries against `now - MAX_ENTRY_AGE_DAYS`,
+#: This is not decoration. `ai_blogs` filters entries against `now - INGEST_MAX_AGE_DAYS`,
 #: so a snapshot generated with a hardcoded date would produce zero rows once the fixtures
 #: aged past the cutoff -- a snapshot of nothing, produced by a test that passes. Deriving
 #: the pinned clock from the fixture set means re-recording updates it as a side effect,
@@ -130,13 +130,28 @@ def record_ai_blogs(client: httpx.Client) -> None:
 
 
 def write_manifest(sources: list[str], captured_at: datetime) -> None:
-    """Record when this fixture set was captured, and from which sources."""
+    """Record when this fixture set was captured, and from which sources.
+
+    ⚠️ **One `captured_at` for the whole set, and a partial refresh rewrites it (R3-1).**
+    `--source arxiv` stamps *now* while twelve of the thirteen fixtures stay where they were,
+    and both `tests/conftest.py::fixture_captured_at` and `snapshot_pipeline.py::snapshot_now`
+    pin the `ai_blogs` clock to that one value. Refresh only arXiv in a month and the pinned
+    clock jumps a month, pushing every `ai_blogs` entry past `INGEST_MAX_AGE_DAYS`: the source
+    empties and its tests fail for a reason that has nothing to do with arXiv.
+
+    **So: refresh with `--source all` until this is fixed.** The fix is a per-source
+    `captured_at` (`{"sources": {"arxiv": {"captured_at": ...}}}`) with `snapshot_now()`
+    taking the oldest, that being the only instant at which every fixture is simultaneously
+    valid. It changes the manifest format, which the snapshot test reads, so it wants doing
+    deliberately -- **if you are editing this file, that moment has arrived.**
+    See docs/reviews/found-during-r3.md.
+    """
     manifest = {
         "captured_at": captured_at.astimezone(UTC).isoformat(),
         "sources": sorted(sources),
         "note": (
             "captured_at pins the clock for scripts/snapshot_pipeline.py. Time-windowed "
-            "adapters (ai_blogs MAX_ENTRY_AGE_DAYS) produce a different row set as "
+            "adapters (ai_blogs INGEST_MAX_AGE_DAYS) produce a different row set as "
             "fixtures age, so the snapshot is only reproducible against this instant."
         ),
     }
