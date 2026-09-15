@@ -280,8 +280,20 @@ def checkpoint(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
 
-def init_db(path: str | Path) -> sqlite3.Connection:
-    """Create the schema if absent and verify the version. Idempotent."""
+def init_db(path: str | Path, *, create: bool = True) -> sqlite3.Connection:
+    """Create the schema if absent and verify the version. Idempotent.
+
+    `create=False` refuses to bring a database into existence. Readers want it: `sqlite3`
+    creates an empty file for any path you hand it, so `digest render --db typo.db` used to
+    produce a brand-new database and the message "Nothing new" -- a confident empty digest
+    indistinguishable from a real one. The failure and the success looked the same.
+    """
+    if not create and not Path(path).exists():
+        raise StoreError(
+            f"no digest database at {Path(path).resolve()}\n"
+            f"       This command reads an existing database and will not create one.\n"
+            f"       Run `digest fetch` first, or pass --db with the right path."
+        )
     conn = connect(path)
     conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
 

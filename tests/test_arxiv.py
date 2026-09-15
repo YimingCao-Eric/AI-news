@@ -5,6 +5,7 @@ Fixtures recorded with:
     uv run python scripts/record_fixtures.py --source arxiv
 """
 
+import re
 from datetime import timedelta
 
 import feedparser
@@ -216,14 +217,49 @@ def test_unparseable_xml_with_no_entries_raises(source):
         fetch(source, bodies)
 
 
-def test_an_empty_but_valid_feed_is_not_an_error(source):
-    """arXiv does not announce every day; empty is a state it can genuinely be in."""
-    empty = '<?xml version="1.0"?><rss version="2.0"><channel><title>cs.AI</title></channel></rss>'
-    adapter = ArxivAdapter()
-    items = run_adapter(adapter, source, serve_by_url(dict.fromkeys(BODIES, empty)))
+EMPTY_FEED = '<?xml version="1.0"?><rss version="2.0"><channel><title>cs.X</title></channel></rss>'
 
-    assert items == []
-    assert all("0 new/cross" in note for note in adapter.drain_notes())
+
+def test_one_empty_category_is_not_an_error(source):
+    """arXiv does not announce every day; an empty category is a state it can be in."""
+    adapter = ArxivAdapter()
+    bodies = {**BODIES, "https://rss.arxiv.org/rss/cs.MA": EMPTY_FEED}
+    items = run_adapter(adapter, source, serve_by_url(bodies))
+
+    assert items
+    assert any("cs.MA: 0 new/cross of 0 entries" in note for note in adapter.drain_notes())
+
+
+def test_every_category_announcing_nothing_is_an_error(source):
+    """One quiet category is normal; all three, parsing cleanly, is a changed feed shape.
+
+    CLAUDE.md's zero-items rule. Previously `failures == len(feeds)` counted only
+    *exceptions*, so three well-formed empty documents were a successful fetch of zero items
+    -- indistinguishable from a quiet weekend, forever.
+    """
+    with pytest.raises(RuntimeError, match="announced zero entries"):
+        run_adapter(ArxivAdapter(), source, serve_by_url(dict.fromkeys(BODIES, EMPTY_FEED)))
+
+
+def test_filtering_every_entry_is_visible_not_silent(source):
+    """SF-8: the announce filter keys on a string field arXiv could rename.
+
+    If `new`/`cross` ever become something else, every entry is dropped and the source
+    reports success with zero items. The note carries the pre-filter count so the two cases
+    read differently: "0 of 0" is a quiet day, "0 of 270" is a broken filter.
+    """
+    adapter = ArxivAdapter()
+    items = run_adapter(adapter, source, serve_by_url(BODIES))
+    notes = adapter.drain_notes()
+
+    assert items
+    for note in notes:
+        assert " of " in note and "entries" in note
+
+    cs_ai = next(note for note in notes if note.startswith("cs.AI"))
+    kept, announced = (int(part) for part in re.findall(r"\d+", cs_ai)[:2])
+    assert announced > kept, "the fixture should contain revisions the filter drops"
+    assert announced == len(parsed(CS_AI))
 
 
 def test_notes_are_drained_between_runs(source):

@@ -361,3 +361,44 @@ def test_notes_survive_the_whole_source_failing(source, bodies, monkeypatch):
     assert all("FAILED" in note for note in notes)
     for name in FEED_NAMES:
         assert any(note.startswith(name) for note in notes)
+
+
+def test_every_feed_parsing_clean_and_empty_is_an_error(source, bodies):
+    """The all-feeds-empty gap, which existed in both bundle adapters.
+
+    CLAUDE.md's zero-items rule says raise if every feed yields nothing. The check only
+    counted *exceptions*, so six well-formed empty documents were a successful fetch of zero
+    items -- indistinguishable from six quiet blogs, forever. One quiet blog is normal; six
+    at once means the endpoints changed shape.
+    """
+    empty = '<?xml version="1.0"?><rss version="2.0"><channel><title>t</title></channel></rss>'
+    with pytest.raises(RuntimeError, match="zero entries"):
+        fetch(source, dict.fromkeys(bodies, empty))
+
+
+def test_one_empty_feed_among_five_live_ones_is_not_an_error(source, bodies):
+    """The other side of it: a single quiet blog must stay unremarkable."""
+    empty = '<?xml version="1.0"?><rss version="2.0"><channel><title>t</title></channel></rss>'
+    items, notes = fetch(source, {**bodies, source.feeds[5].url: empty})
+
+    assert items
+    assert any("cursor: 0 entries" in note for note in notes)
+
+
+def test_stale_feeds_are_not_mistaken_for_broken_ones(source):
+    """Entries that exist but are all older than the cutoff are stale, not a changed shape.
+
+    The guard counts *entries*, not items, precisely so this case still returns cleanly and
+    reports STALE rather than raising -- a feed that has gone quiet is a different problem
+    from a feed we can no longer parse, and conflating them would make the staleness warning
+    unreachable.
+    """
+    old = fixture_captured_at() - timedelta(days=200)
+    bodies = {
+        feed.url: rss(f"ancient {feed.name}", f"https://e.example/{feed.name}", old)
+        for feed in source.feeds
+    }
+    items, notes = fetch(source, bodies)
+
+    assert items == []
+    assert all("STALE" in note for note in notes)

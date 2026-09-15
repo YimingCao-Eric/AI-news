@@ -115,6 +115,7 @@ class AIBlogsAdapter(Adapter):
         )
 
         items: list[Item] = []
+        succeeded: list[FeedOutcome] = []
         failures = 0
         for feed, result in zip(feeds, results, strict=True):
             if isinstance(result, BaseException):
@@ -126,12 +127,26 @@ class AIBlogsAdapter(Adapter):
                 self._notes.append(f"{feed.name}: FAILED {type(result).__name__}: {result}")
                 continue
             self._notes.append(_describe(result, now))
+            succeeded.append(result)
             items.extend(result.items)
 
         if failures == len(feeds):
             # Every feed down at once is a network or mirror outage, not six quiet blogs.
             raise RuntimeError(
                 f"{source.name}: all {failures} feeds failed. Notes: {'; '.join(self._notes)}"
+            )
+
+        if failures == 0 and all(outcome.total_entries == 0 for outcome in succeeded):
+            # CLAUDE.md's zero-items rule, the half that was missing: every feed parsed
+            # cleanly and every one was empty. One quiet blog is normal; six at once, with
+            # well-formed documents, means the endpoints changed shape rather than that
+            # nobody published. Note this counts *entries*, not items -- feeds full of
+            # entries that are all older than MAX_ENTRY_AGE_DAYS are stale, not broken, and
+            # the per-feed STALE notes already say so.
+            raise RuntimeError(
+                f"{source.name}: all {len(feeds)} feeds parsed cleanly and contained zero "
+                f"entries between them. One quiet blog is normal, six is not. Re-record the "
+                f"fixtures and check the mapping. Notes: {'; '.join(self._notes)}"
             )
 
         if source.fetch_limit is not None:

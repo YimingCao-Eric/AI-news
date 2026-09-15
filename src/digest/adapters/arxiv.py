@@ -62,6 +62,7 @@ class ArxivAdapter(Adapter):
 
         per_feed: list[list[Item]] = []
         failures = 0
+        announced = 0
         for feed, result in zip(feeds, results, strict=True):
             if isinstance(result, BaseException):
                 if not isinstance(result, Exception):
@@ -69,12 +70,29 @@ class ArxivAdapter(Adapter):
                 failures += 1
                 self._notes.append(f"{feed.name}: FAILED {type(result).__name__}: {result}")
                 continue
-            per_feed.append(result)
-            self._notes.append(f"{feed.name}: {len(result)} new/cross")
+            kept, total_entries = result
+            per_feed.append(kept)
+            announced += total_entries
+            # The pre-filter count is the point: "0 of 0" is a quiet day, "0 of 270" is a
+            # broken filter, and without the denominator both print as a bare zero. The
+            # filter keys on a string field, so an arXiv rename of `new`/`cross` would drop
+            # 100% of input while the source reported success.
+            self._notes.append(f"{feed.name}: {len(kept)} new/cross of {total_entries} entries")
 
         if failures == len(feeds):
             raise RuntimeError(
                 f"{source.name}: every category failed ({failures}/{len(feeds)}). "
+                f"Notes: {'; '.join(self._notes)}"
+            )
+
+        if announced == 0 and failures == 0:
+            # Every category parsed and every one was empty. arXiv is genuinely quiet on some
+            # days, but not on all three categories at once with well-formed documents --
+            # CLAUDE.md's zero-items rule: that is "we no longer understand this endpoint".
+            raise RuntimeError(
+                f"{source.name}: all {len(feeds)} categories parsed cleanly and announced "
+                f"zero entries between them. One quiet category is normal; all of them is "
+                f"the feed shape changing. Re-record the fixtures and check the mapping. "
                 f"Notes: {'; '.join(self._notes)}"
             )
 
@@ -85,7 +103,14 @@ class ArxivAdapter(Adapter):
 
     async def _fetch_feed(
         self, client: httpx.AsyncClient, feed: Feed, source_name: str
-    ) -> list[Item]:
+    ) -> tuple[list[Item], int]:
+        """Return the kept items and how many entries the feed announced before filtering.
+
+        A plain tuple rather than a named per-feed result type: `ai_blogs.FeedOutcome` is one
+        already, and a second would be the fourth result type in the project -- the recorded
+        trigger for reconciling all of them, which Themes 5 and 6 own. Not pre-empting that
+        decision here.
+        """
         async with asyncio.timeout(FEED_TIMEOUT_SECONDS):
             response = await client.get(feed.url)
         response.raise_for_status()
@@ -100,13 +125,15 @@ class ArxivAdapter(Adapter):
             )
 
         # A genuinely empty category is possible -- arXiv does not announce every day -- so
-        # this returns [] rather than raising. The count reaches the summary via notes.
-        return [
+        # this returns [] rather than raising. The counts reach the summary via notes, and
+        # the all-categories-empty case is the caller's to judge.
+        kept = [
             item
             for entry in parsed.entries
             if entry.get("arxiv_announce_type", "new") in KEPT_ANNOUNCE_TYPES
             and (item := _item_from_entry(entry, source_name, feed.name)) is not None
         ]
+        return kept, len(parsed.entries)
 
 
 def _round_robin(per_feed: list[list[Item]]) -> list[Item]:

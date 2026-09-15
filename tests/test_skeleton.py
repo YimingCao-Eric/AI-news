@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from digest.cli import build_parser, main
+from digest.cli import EXIT_USAGE_OR_CONFIG, build_parser, main
 from digest.config import ConfigError, Source, load_config
 from digest.models import Item, SourceHealth
 
@@ -163,9 +163,12 @@ def test_stub_subcommands_still_print_the_config(command, capsys):
 
 
 def test_no_subcommand_prints_help_and_fails():
-    assert main([]) == 1
+    """2, not 1: argparse hardcodes 2 in `parser.error()`, so `digest --nonsense` already
+    exited 2 while `digest` alone exited 1. Two spellings of "the invocation is wrong"
+    returning different codes is a distinction no scheduler can use."""
+    assert main([]) == EXIT_USAGE_OR_CONFIG
 
 
 def test_bad_config_dir_exits_two(tmp_path, capsys):
-    assert main(["fetch", "--config-dir", str(tmp_path)]) == 2
+    assert main(["fetch", "--config-dir", str(tmp_path)]) == EXIT_USAGE_OR_CONFIG
     assert "error:" in capsys.readouterr().err
